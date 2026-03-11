@@ -408,8 +408,8 @@ class DataProcessor:
             for col in base_cols:
                 self.feature_columns.append(f'{col}_T-{d}')
         
-        # 保留標籤欄位與 Close（回測需要）
-        keep_cols = ['Close', 'Volume', '三天後漲跌(%)', 'Label']
+        # 保留標籤欄位與回測需要的OHLCV欄位
+        keep_cols = ['Open', 'High', 'Low', 'Close', 'Volume', '三天後漲跌(%)', 'Label']
         result = pd.concat([df[keep_cols], flatten_df], axis=1)
         result = result.replace([np.inf, -np.inf], np.nan).dropna()
         
@@ -640,16 +640,26 @@ class ModelEngine:
     
     def __init__(self, feature_columns):
         self.feature_columns = feature_columns
-        self.scaler = StandardScaler()  # 統一的特徵標準化器
-        # 統一的 Autoencoder（處理所有訓練資料）
-        self.autoencoder = None
-        self.encoder = None
-        self.history = None
-        # 在統一 Latent Space 上的兩個 OC-SVM
+        # 分別的特徵標準化器
+        self.scaler_up = StandardScaler()    # 看漲型態專用標準化器
+        self.scaler_down = StandardScaler()  # 看跌型態專用標準化器
+        
+        # 分別的 Autoencoder（看漲和看跌型態各自專用）
+        self.autoencoder_up = None    # 看漲型態專用AE
+        self.encoder_up = None
+        self.history_up = None
+        
+        self.autoencoder_down = None  # 看跌型態專用AE  
+        self.encoder_down = None
+        self.history_down = None
+        
+        # 在各自 Latent Space 上的 OC-SVM
         self.svm_up = None
         self.svm_down = None
-        # Latent Code 標準化器（讓 OC-SVM 在同一基準上訓練）
-        self.latent_scaler = StandardScaler()
+        
+        # Latent Code 標準化器（各自在自己的潛在空間）
+        self.latent_scaler_up = StandardScaler()   # 看漲型態Latent標準化器
+        self.latent_scaler_down = StandardScaler() # 看跌型態Latent標準化器
     
     # ========== Autoencoder 建立與訓練 ==========
     def build_autoencoder(self, input_dim=22):
@@ -683,70 +693,71 @@ class ModelEngine:
     
     def train_autoencoder(self, train_df, epochs=50, batch_size=32):
         """
-        訓練一個統一的 Autoencoder（處理所有訓練資料）
-        解決問題：兩個獨立的 AE 會產生不同的 Latent Space，
-        導致 OC-SVM 的 decision_function 分數無法直接比較。
+        分別訓練看漲和看跌的 Autoencoder
         
         新架構：
-        1. 使用所有訓練資料（上漲 + 下跌）訓練一個統一的 AE
-        2. 提取統一的 Latent Space（4 維）
-        3. 在這個統一空間上分別訓練兩個 OC-SVM（上漲、下跌）
+        1. 為看漲型態訓練專用的 AE（學習看漲特徵表示）
+        2. 為看跌型態訓練專用的 AE（學習看跌特徵表示）
+        3. 在各自的 Latent Space 上訓練對應的 OC-SVM
         
         Args:
             train_df: 訓練資料（含 Label 欄位）
             epochs: 訓練輪數
             batch_size: 批次大小
         """
-        # 收集所有有標籤的樣本（Label = 1 或 -1）
-        labeled_samples = train_df[train_df['Label'] != 0][self.feature_columns].values
+        # 分別收集看漲和看跌樣本
+        up_samples = train_df[train_df['Label'] == 1][self.feature_columns].values
+        down_samples = train_df[train_df['Label'] == -1][self.feature_columns].values
         
-        if len(labeled_samples) < 10:
-            print("⚠️ 訓練樣本不足，無法訓練 Autoencoder")
-            return
+        print(f"分別訓練 AE：看漲 {len(up_samples)} 樣本, 看跌 {len(down_samples)} 樣本")
         
-        print(f"統一 AE 訓練：共 {len(labeled_samples)} 個樣本")
-        
-        # 統一標準化（所有樣本使用同一個 scaler）
-        X_scaled = self.scaler.fit_transform(labeled_samples)
-        
-        # ── 切分訓練 / 驗證集 ──────────────────────
-        from sklearn.model_selection import train_test_split
-        _use_val = len(X_scaled) >= 20
-        if _use_val:
-            X_train, X_val = train_test_split(
-                X_scaled, test_size=0.2, random_state=RANDOM_SEED)
-            print(f"  驗證集切分：訓練 {len(X_train)}, 驗證 {len(X_val)}")
+        # ========== 訓練看漲型態 Autoencoder ==========
+        if len(up_samples) >= 10:
+            print("🔺 訓練看漲型態 Autoencoder...")
+            X_up_scaled = self.scaler_up.fit_transform(up_samples)
+            
+            # 建立看漲專用 AE
+            self.autoencoder_up, self.encoder_up = self.build_autoencoder(len(self.feature_columns))
+            self.autoencoder_up.compile(optimizer='adam', loss='mse')
+            
+            # 訓練看漲 AE
+            history_up = self.autoencoder_up.fit(
+                X_up_scaled, X_up_scaled,
+                epochs=epochs,
+                batch_size=min(batch_size, len(X_up_scaled)),
+                verbose=0
+            )
+            
+            self.history_up = history_up
+            train_loss_up = history_up.history['loss'][-1]
+            print(f"  ✓ 看漲 AE 訓練完成 (損失: {train_loss_up:.6f})")
         else:
-            X_train, X_val = X_scaled, None
+            print("  ⚠️ 看漲樣本不足，跳過訓練")
         
-        # ── 建立統一的 Autoencoder ──────────────────
-        self.autoencoder, self.encoder = self.build_autoencoder(len(self.feature_columns))
-        self.autoencoder.compile(optimizer='adam', loss='mse')
+        # ========== 訓練看跌型態 Autoencoder ==========
+        if len(down_samples) >= 10:
+            print("🔻 訓練看跌型態 Autoencoder...")
+            X_down_scaled = self.scaler_down.fit_transform(down_samples)
+            
+            # 建立看跌專用 AE
+            self.autoencoder_down, self.encoder_down = self.build_autoencoder(len(self.feature_columns))
+            self.autoencoder_down.compile(optimizer='adam', loss='mse')
+            
+            # 訓練看跌 AE
+            history_down = self.autoencoder_down.fit(
+                X_down_scaled, X_down_scaled,
+                epochs=epochs,
+                batch_size=min(batch_size, len(X_down_scaled)),
+                verbose=0
+            )
+            
+            self.history_down = history_down
+            train_loss_down = history_down.history['loss'][-1]
+            print(f"  ✓ 看跌 AE 訓練完成 (損失: {train_loss_down:.6f})")
+        else:
+            print("  ⚠️ 看跌樣本不足，跳過訓練")
         
-        # ── 訓練 ──────────────────────────────────────
-        history = self.autoencoder.fit(
-            X_train, X_train,
-            epochs=epochs,
-            batch_size=min(batch_size, len(X_train)),
-            validation_data=(X_val, X_val) if _use_val else None,
-            verbose=0
-        )
-        
-        # 儲存訓練歷史
-        class _HistoryWrapper:
-            def __init__(self, hist):
-                self.history = hist
-        
-        self.history = _HistoryWrapper(history.history)
-        
-        train_loss = history.history['loss'][-1]
-        msg = f"✓ 統一 AE 訓練完成 (最終訓練損失: {train_loss:.6f}"
-        if _use_val and 'val_loss' in history.history:
-            val_loss = history.history['val_loss'][-1]
-            msg += f", 驗證損失: {val_loss:.6f}"
-        msg += ")"
-        print(msg)
-        print("  優勢：所有樣本共享同一個 Latent Space，OC-SVM 分數具可比性")
+        print("✅ 分別訓練完成，各型態擁有專用的特徵表示空間")
     
     def _train_autoencoder_legacy(self, train_df, epochs=50, batch_size=32):
         """
@@ -763,26 +774,49 @@ class ModelEngine:
         # 後續代碼省略...
         pass
     
-    def get_latent_code(self, df):
+    def get_latent_code(self, df, pattern_type='auto'):
         """
         取得 Latent Code (4維壓縮特徵)
-        使用統一的 encoder 提取特徵
+        根據型態類型使用對應的編碼器
         
         Args:
             df: 資料
+            pattern_type: 'up'(看漲), 'down'(看跌), 'auto'(自動判斷)
             
         Returns:
             latent_code: 4維特徵向量
         """
         X = df[self.feature_columns].values
         
-        if self.encoder is None:
-            print("警告：模型尚未訓練，返回零向量")
+        # 自動判斷型態類型
+        if pattern_type == 'auto':
+            if 'Label' in df.columns:
+                up_count = (df['Label'] == 1).sum()
+                down_count = (df['Label'] == -1).sum()
+                pattern_type = 'up' if up_count >= down_count else 'down'
+            else:
+                # 無標籤時預設使用看漲編碼器
+                pattern_type = 'up'
+        
+        # 選擇對應的編碼器和標準化器
+        if pattern_type == 'up':
+            encoder = self.encoder_up
+            scaler = self.scaler_up
+            model_name = "看漲"
+        elif pattern_type == 'down':
+            encoder = self.encoder_down
+            scaler = self.scaler_down
+            model_name = "看跌"
+        else:
+            raise ValueError(f"不支援的型態類型: {pattern_type}")
+        
+        if encoder is None:
+            print(f"警告：{model_name}模型尚未訓練，返回零向量")
             return np.zeros((len(df), 4))
         
-        # 使用統一的 scaler 轉換
-        X_scaled = self.scaler.transform(X)
-        latent_code = self.encoder.predict(X_scaled, verbose=0)
+        # 使用對應的標準化器轉換
+        X_scaled = scaler.transform(X)
+        latent_code = encoder.predict(X_scaled, verbose=0)
         
         return latent_code
     
@@ -816,7 +850,7 @@ class ModelEngine:
     def train_one_class_svm(self, train_df):
         """
         訓練兩個 One-Class SVM (一個學習上漲、一個學習下跌)
-        使用對應 Autoencoder 的 Latent Code
+        使用各自專用 Autoencoder 的 Latent Code
         
         Args:
             train_df: 訓練資料
@@ -831,9 +865,9 @@ class ModelEngine:
         up_samples = train_df[train_df['Label'] == 1]
         down_samples = train_df[train_df['Label'] == -1]
         
-        # 取得對應的 Latent Code (使用統一 AE 編碼後的 4 維特徵)
-        latent_up = self.get_latent_code(up_samples) if len(up_samples) > 0 else np.array([])
-        latent_down = self.get_latent_code(down_samples) if len(down_samples) > 0 else np.array([])
+        # 使用各自專用編碼器取得 Latent Code
+        latent_up = self.get_latent_code(up_samples, pattern_type='up') if len(up_samples) > 0 else np.array([])
+        latent_down = self.get_latent_code(down_samples, pattern_type='down') if len(down_samples) > 0 else np.array([])
         
         # 訓練 SVM (nu=0.1 表示預期 10% 的樣本為異常值)
         self.svm_up = OneClassSVM(kernel='rbf', gamma='auto', nu=0.1)
@@ -842,22 +876,28 @@ class ModelEngine:
         if len(latent_up) > 0:
             latent_up_scaled = self.latent_scaler_up.fit_transform(latent_up)
             self.svm_up.fit(latent_up_scaled)
+            print(f"  🔺 看漲 OC-SVM 訓練完成 (樣本數: {len(latent_up)})")
+        else:
+            print("  ⚠️ 看漲樣本不足，跳過 OC-SVM 訓練")
+            
         if len(latent_down) > 0:
             latent_down_scaled = self.latent_scaler_down.fit_transform(latent_down)
             self.svm_down.fit(latent_down_scaled)
+            print(f"  🔻 看跌 OC-SVM 訓練完成 (樣本數: {len(latent_down)})")
+        else:
+            print("  ⚠️ 看跌樣本不足，跳過 OC-SVM 訓練")
         
-        print(f"One-Class SVM 訓練完成 (上漲樣本: {len(latent_up)}, 下跌樣本: {len(latent_down)})")
-        print(f"nu=0.1 設定: 預期約 10% 樣本為邊界外，將影響交易頻率")
+        print(f"✅ 分別 OC-SVM 訓練完成 (nu=0.1，預期 10% 異常)")
+        print("  優勢：各型態在專用 Latent Space 中學習，特徵表示更精確")
     
     def svm_predict(self, test_df, theta=0.1):
         """
-        使用 One-Class SVM 預測（含信心門檻 θ）
+        使用分別的 One-Class SVM 預測（含信心門檻 θ）
         
-        決策邏輯：
-            diff = Score_up − Score_down
-            ─ |diff| < θ  → 0（雜訊，不進場）
-            ─  diff ≥  θ  → 1（預測上漲）
-            ─  diff ≤ -θ  → -1（預測下跌）
+        新決策邏輯：
+            1. 在看漲專用 Latent Space 中計算看漲分數
+            2. 在看跌專用 Latent Space 中計算看跌分數
+            3. 正規化後比較分數差異，應用信心門檻
         
         Args:
             test_df: 測試資料
@@ -866,25 +906,35 @@ class ModelEngine:
         Returns:
             predictions: 預測結果 (1=上漲, -1=下跌, 0=觀望)
         """
-        # 使用統一模型的 latent code（兩個SVM都用同一組特徵）
-        latent_code = self.get_latent_code(test_df)
+        # 分別在兩個專用 Latent Space 中計算 latent code
+        latent_up = self.get_latent_code(test_df, pattern_type='up')
+        latent_down = self.get_latent_code(test_df, pattern_type='down')
         
         predictions = []
         for i in range(len(test_df)):
-            lc = latent_code[i].reshape(1, -1)
+            # 在看漲專用空間中評估
+            lc_up = latent_up[i].reshape(1, -1)
+            lc_up_scaled = self.latent_scaler_up.transform(lc_up)
+            up_score = self.svm_up.decision_function(lc_up_scaled)[0] if self.svm_up else -np.inf
             
-            # 使用統一的 latent code 分別計算兩個 SVM 的分數
-            up_score   = self.svm_up.decision_function(lc)[0]   if self.svm_up   else -np.inf
-            down_score = self.svm_down.decision_function(lc)[0] if self.svm_down else -np.inf
+            # 在看跌專用空間中評估
+            lc_down = latent_down[i].reshape(1, -1)
+            lc_down_scaled = self.latent_scaler_down.transform(lc_down)
+            down_score = self.svm_down.decision_function(lc_down_scaled)[0] if self.svm_down else -np.inf
             
-            diff = up_score - down_score
+            # 正規化分數（避免不同空間的分數直接比較問題）
+            up_normalized = 1 / (1 + np.exp(-up_score))      # Sigmoid 正規化
+            down_normalized = 1 / (1 + np.exp(-down_score))  # Sigmoid 正規化
             
+            diff = up_normalized - down_normalized
+            
+            # 應用信心門檻
             if abs(diff) < theta:
                 predictions.append(0)   # 差距不足 θ → 視為雜訊，不進場
             elif diff > 0:
-                predictions.append(1)   # 上漲訊號
+                predictions.append(1)   # 看漲訊號更強
             else:
-                predictions.append(-1)  # 下跌訊號
+                predictions.append(-1)  # 看跌訊號更強
         
         return np.array(predictions)
 
@@ -1112,7 +1162,9 @@ class Backtester:
                 't_statistic': 0,
                 'p_value': 1.0,
                 'is_significant': False,
-                'conclusion': '數據不足，無法進行統計檢定'
+                'conclusion': '數據不足，無法進行統計檢定',
+                'strategy_mean': 0.0,
+                'benchmark_mean': 0.0
             }
         
         # 執行獨立樣本 T 檢定（單尾檢定：策略 > 基準）
@@ -1425,17 +1477,17 @@ class App:
             )
             
             # ========================================================================
-            # Step 2: AE 預訓練（含對比損失）
-            # 核心任務: 在同產業股票歷史資料上訓練含 Contrastive Loss 的 AE
-            # 對比損失讓 AE-up 和 AE-down 在 Latent Space 上有最大鑑別度
+            # Step 2: AE 分別訓練
+            # 核心任務: 分別為看漲和看跌型態訓練專用的 Autoencoder
+            # 注意事項: 監控重構誤差（Reconstruction Error），確保特徵沒丟失
             # ========================================================================
-            self.update_status("🧠 [Step 2/4] AE 預訓練（對比損失）：在同產業資料上訓練...")
+            self.update_status("🧠 [Step 2/4] 分別 AE 訓練：為看漲和看跌型態建立專用模型...")
             
             # 2-1. 初始化模型引擎
             self.model_engine = ModelEngine(self.data_processor.feature_columns)
             
             # 2-2. 用 Step 1 篩選結果過濾訓練資料，只保留屬於型態群組的高品質樣本
-            self.update_status("🔄 使用 Step 1 篩選後的型態樣本訓練 Contrastive AE（λ=0.5, margin=0.5）...")
+            self.update_status("🔄 使用 Step 1 篩選後的型態樣本分別訓練看漲和看跌 AE...")
             
             filtered_train_data = pattern_selector.filter_training_data(train_stock_data)
             all_train_raw = pd.concat([df for df in train_stock_data.values()], ignore_index=True)
@@ -1453,18 +1505,22 @@ class App:
                     f"使用全部 {len(all_train_data)} 筆訓練"
                 )
             
-            # 訓練 統一 Autoencoder
+            # 訓練分別的 Autoencoder
             self.model_engine.train_autoencoder(all_train_data, epochs=50)
             
-            # 2-3. 監控損失
-            if self.model_engine.history is not None:
-                hist = self.model_engine.history.history
-                _msg = f"✅ 統一 AE 最終損失: {hist['loss'][-1]:.6f}"
-                if 'val_loss' in hist:
-                    _msg += f", 驗證損失: {hist['val_loss'][-1]:.6f}"
-                self.update_status(_msg)
+            # 2-3. 監控各自的損失
+            up_msg = down_msg = ""
+            if hasattr(self.model_engine, 'history_up') and self.model_engine.history_up is not None:
+                up_loss = self.model_engine.history_up.history['loss'][-1]
+                up_msg = f"看漲 AE: {up_loss:.6f}"
+            if hasattr(self.model_engine, 'history_down') and self.model_engine.history_down is not None:
+                down_loss = self.model_engine.history_down.history['loss'][-1]
+                down_msg = f"看跌 AE: {down_loss:.6f}"
             
-            self.update_status("✅ [Step 2 完成] Contrastive AE 預訓練完成，Latent Space 鑑別度提升")
+            if up_msg or down_msg:
+                self.update_status(f"✅ 分別 AE 最終損失: {up_msg}, {down_msg}")
+            
+            self.update_status("✅ [Step 2 完成] 分別 AE 訓練完成，各型態擁有專用特徵空間")
             
             # ========================================================================
             # Step 3: OC-SVM 建模
@@ -1477,8 +1533,8 @@ class App:
             self.model_engine.train_one_class_svm(all_train_data)
             
             self.update_status(
-                "✅ [Step 3 完成] OC-SVM 訓練完成 "
-                "(nu=0.1 表示預期 10% 異常，將影響交易頻率)"
+                "✅ [Step 3 完成] 分別 OC-SVM 訓練完成 "
+                "(各型態在專用 Latent Space 中訓練，特徵表示更精確)"
             )
             
             # ========================================================================
@@ -1489,7 +1545,7 @@ class App:
             self.update_status("📊 [Step 4/4] 回測驗證：評估 OC-SVM + 信心門檻 θ 的型態勝率...")
             
             # 4-1. OC-SVM 預測（含信心門檻 θ=0.1，差距不足視為雜訊，不進場）
-            THETA = 1.0
+            THETA = 0.1
             self.update_status(f"🔮 使用 OC-SVM+θ={THETA} 過濾型態（雜訊過濾中）...")
             pred_svm = self.model_engine.svm_predict(test_df, theta=THETA)
             
@@ -1739,13 +1795,20 @@ class App:
         fig, ax = plt.subplots(1, 1, figsize=(w, h), facecolor='#2d2d2d')
         fig.subplots_adjust(left=0.1, right=0.95, top=0.90, bottom=0.15)
 
-        if self.model_engine.history is not None:
+        if hasattr(self.model_engine, 'history_up') or hasattr(self.model_engine, 'history_down'):
             ax.set_facecolor('#1e1e1e')
-            history = self.model_engine.history.history
-            ax.plot(history['loss'], color='#4caf50', linewidth=2, label='Training Loss')
-            if 'val_loss' in history:
-                ax.plot(history['val_loss'], color='#81c784', linewidth=2, label='Validation Loss')
-            ax.set_title('統一 Autoencoder Loss', color='white', fontsize=12, fontweight='bold')
+            
+            # 繪製看漲 AE 訓練歷史
+            if hasattr(self.model_engine, 'history_up') and self.model_engine.history_up is not None:
+                history_up = self.model_engine.history_up.history
+                ax.plot(history_up['loss'], color='#4caf50', linewidth=2, label='看漲 AE 訓練損失')
+            
+            # 繪製看跌 AE 訓練歷史
+            if hasattr(self.model_engine, 'history_down') and self.model_engine.history_down is not None:
+                history_down = self.model_engine.history_down.history
+                ax.plot(history_down['loss'], color='#f44336', linewidth=2, label='看跌 AE 訓練損失')
+            
+            ax.set_title('分別 Autoencoder 訓練損失', color='white', fontsize=12, fontweight='bold')
             ax.set_xlabel('Epoch', color='white', fontsize=10)
             ax.set_ylabel('Loss (MSE)', color='white', fontsize=10)
             ax.tick_params(colors='white', labelsize=9)
