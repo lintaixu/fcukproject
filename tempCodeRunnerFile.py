@@ -1,27 +1,3 @@
-"""
-K線型態預測系統 - 使用 Autoencoder + One-Class SVM + 基因演算法
-資料探勘期末作業
-學號: D1245765
-
-【核心流程】
-Step 1: 特徵工程
-    - 提取 10 種型態特徵 + 基礎量價指標
-    - 注意事項：務必進行標準化（Scaling），避免股價絕對值影響 AE 訓練
-
-Step 2: AE 預訓練
-    - 在同產業股票歷史資料上訓練，提取 Latent Space
-    - 注意事項：監控重構誤差（Reconstruction Error），確保特徵沒丟失
-
-Step 3: OC-SVM 建模
-    - 使用編碼後的特徵（Latent Code）訓練 OC-SVM
-    - 注意事項：調整 nu 參數（預期的異常比例），這會直接影響交易頻率
-
-Step 4: 回測驗證
-    - 驗證通過 OC-SVM 過濾後的看漲型態，勝率是否顯著提升
-    - 注意事項：警惕「存活者偏差」，確保回測包含已退市或下市的股票
-"""
-
-# ==================== 隨機種子設定（必須在最開始） ====================
 import os
 import random
 
@@ -95,9 +71,12 @@ class DataProcessor:
             '開盤型態(%)', '收盤型態(%)', '成交量突變率', '前五日趨勢',
             '相對成交量'  # 第 11 特徵：當日成交量 / 5日均量
         ]
-        # 滑動視窗後展開的最終特徵欄位（統計聚合：11特徵 × 2統計量 = 22維）
-        # 會在 _apply_sliding_window 中動態生成
-        self.feature_columns = []  # 暫時為空，待計算特徵時再設定
+        # 滑動視窗後展開的最終特徵欄位（day0~day{W-1} × 11特徵）
+        self.feature_columns = [
+            f'{feat}_d{d}'
+            for d in range(self.WINDOW_SIZE)
+            for feat in self._base_feature_columns
+        ]
         # 台股市場代表性樣本：涵蓋台灣 50 + 中型 100 主要成分股
         # 包含電子、金融、傳產、塑化、航運、食品等各產業龍頭
         self.market_stocks = [
@@ -242,35 +221,31 @@ class DataProcessor:
 
     def fetch_multiple_stocks(self, stock_codes, start_date, end_date):
         """
-        並行抓取多檔股票資料（ThreadPoolExecutor）
-        """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        抓取多檔股票資料
         
+        Args:
+            stock_codes: 股票代碼列表
+            start_date: 開始日期
+            end_date: 結束日期
+            
+        Returns:
+            dict: {stock_code: DataFrame}
+        """
         all_data = {}
         total = len(stock_codes)
         
-        def _fetch_one(stock_code):
+        for idx, stock_code in enumerate(stock_codes, 1):
             try:
+                print(f"[{idx}/{total}] 正在抓取 {stock_code} 資料...")
                 data = self.fetch_data(stock_code, start_date, end_date)
                 if not data.empty:
                     df = self.calculate_features(data)
                     if not df.empty:
-                        return stock_code, df
+                        all_data[stock_code] = df
+                        print(f"✓ {stock_code} 資料處理完成，共 {len(df)} 筆")
             except Exception as e:
                 print(f"✗ {stock_code} 處理失敗: {str(e)}")
-            return stock_code, None
-        
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(_fetch_one, code): code for code in stock_codes}
-            done = 0
-            for future in as_completed(futures):
-                done += 1
-                code, df = future.result()
-                if df is not None:
-                    all_data[code] = df
-                    print(f"[{done}/{total}] ✓ {code} 完成，共 {len(df)} 筆")
-                else:
-                    print(f"[{done}/{total}] ✗ {code} 跟鹈失敗")
+                continue
         
         print(f"\n總結：成功 {len(all_data)}/{total} 檔股票\n")
         return all_data
@@ -384,33 +359,22 @@ class DataProcessor:
 
     def _apply_sliding_window(self, df):
         """
-        將 WINDOW_SIZE 天的特徵直接攤平（Flatten），保留嚴格的時間序列順序。
-        
-        方法：將 N 天（例如 3 天）的特徵攤平成向量 [T_{-2}, T_{-1}, T_0]
-        - 3 天 × 11 個基礎特徵 = 33 維向量
-        - 完整保留時序信息，避免使用統計聚合造成的信息損失
+        將 WINDOW_SIZE 天的基礎特徵橫向拼接，形成更長的特徵向量。
+        day0 = 最新一天（t），day1 = t-1，day2 = t-2 ...
         """
-        W = self.WINDOW_SIZE  # 3
-        base_cols = self._base_feature_columns  # 11 個基礎特徵
+        W = self.WINDOW_SIZE
+        base_cols = self._base_feature_columns
         
-        # 建立 3 天的滑動視窗資料（d0=今天, d1=昨天, d2=前天）
-        flatten_data = {}
-        for d in range(W - 1, -1, -1):  # 從前天到今天，保持順序 [T-2, T-1, T0]
+        window_data = {}
+        for d in range(W):
             for col in base_cols:
-                # 命名格式：特徵名_T-2, 特徵名_T-1, 特徵名_T0
-                flatten_data[f'{col}_T-{d}'] = df[col].shift(d)
+                window_data[f'{col}_d{d}'] = df[col].shift(d)
         
-        flatten_df = pd.DataFrame(flatten_data, index=df.index)
-        
-        # 更新 feature_columns（產生 3 × 11 = 33 個特徵，嚴格保持時序）
-        self.feature_columns = []
-        for d in range(W - 1, -1, -1):
-            for col in base_cols:
-                self.feature_columns.append(f'{col}_T-{d}')
+        window_df = pd.DataFrame(window_data, index=df.index)
         
         # 保留標籤欄位與 Close（回測需要）
         keep_cols = ['Close', 'Volume', '三天後漲跌(%)', 'Label']
-        result = pd.concat([df[keep_cols], flatten_df], axis=1)
+        result = pd.concat([df[keep_cols], window_df], axis=1)
         result = result.replace([np.inf, -np.inf], np.nan).dropna()
         
         return result
@@ -447,9 +411,6 @@ class PatternSelector:
         self.min_frequency = min_frequency
         self.min_avg_return = min_avg_return
         self.selected_patterns = {'up': [], 'down': []}
-        # 儲存屬於 DBSCAN 群組（非噪音）的樣本索引 (stock, date)
-        self._clustered_up_keys = set()
-        self._clustered_down_keys = set()
     
     def find_frequent_patterns(self, all_stock_data, similarity_threshold=0.5):
         """
@@ -469,24 +430,26 @@ class PatternSelector:
         all_down_patterns = []
         
         for stock_code, train_df in all_stock_data.items():
-            up_samples   = train_df[train_df['Label'] == 1]
+            up_samples = train_df[train_df['Label'] == 1]
             down_samples = train_df[train_df['Label'] == -1]
             
-            # 向量化：用 numpy 取得特徵矩陣，避免 iterrows()
-            if len(up_samples) > 0:
-                feats = up_samples[self.feature_columns].values
-                rets  = up_samples['三天後漲跌(%)'].values
-                dates = up_samples.index.tolist()
-                for j in range(len(up_samples)):
-                    all_up_patterns.append({'features': feats[j], 'return': rets[j],
-                                            'stock': stock_code, 'date': dates[j]})
-            if len(down_samples) > 0:
-                feats = down_samples[self.feature_columns].values
-                rets  = down_samples['三天後漲跌(%)'].values
-                dates = down_samples.index.tolist()
-                for j in range(len(down_samples)):
-                    all_down_patterns.append({'features': feats[j], 'return': rets[j],
-                                              'stock': stock_code, 'date': dates[j]})
+            for _, row in up_samples.iterrows():
+                pattern = {
+                    'features': row[self.feature_columns].values,
+                    'return': row['三天後漲跌(%)'],
+                    'stock': stock_code,
+                    'date': row.name
+                }
+                all_up_patterns.append(pattern)
+            
+            for _, row in down_samples.iterrows():
+                pattern = {
+                    'features': row[self.feature_columns].values,
+                    'return': row['三天後漲跌(%)'],
+                    'stock': stock_code,
+                    'date': row.name
+                }
+                all_down_patterns.append(pattern)
         
         print(f"收集到 {len(all_up_patterns)} 個大漲型態, {len(all_down_patterns)} 個大跌型態")
         
@@ -511,7 +474,6 @@ class PatternSelector:
         
         # 使用聚類方法找出相似型態群組
         from sklearn.cluster import DBSCAN
-        from sklearn.decomposition import PCA
         
         features = np.array([p['features'] for p in patterns])
         
@@ -519,33 +481,9 @@ class PatternSelector:
         scaler = StandardScaler()
         features_scaled = scaler.fit_transform(features)
         
-        # ── 加入 PCA 降維以解決維度詛咒問題 ──────────────────────
-        # 將 33 維特徵降至 5 維，讓 DBSCAN 在低維空間中更有效
-        n_components = min(5, features_scaled.shape[0], features_scaled.shape[1])
-        pca = PCA(n_components=n_components, random_state=RANDOM_SEED)
-        features_pca = pca.fit_transform(features_scaled)
-        
-        explained_var = pca.explained_variance_ratio_.sum()
-        print(f"  PCA 降維: {features_scaled.shape[1]}維 → {n_components}維 "
-              f"(保留 {explained_var*100:.1f}% 變異量)")
-        
-        # DBSCAN 聚類（在降維後的空間中運行，eps 可以設定較小值）
-        clustering = DBSCAN(eps=1.2, min_samples=self.min_frequency).fit(features_pca)
+        # DBSCAN 聚類
+        clustering = DBSCAN(eps=0.8, min_samples=self.min_frequency).fit(features_scaled)
         labels = clustering.labels_
-        
-        # 記錄屬於群組的樣本（非噪音），供後續篩選訓練資料
-        clustered_keys = set()
-        for i, lbl in enumerate(labels):
-            if lbl != -1:
-                clustered_keys.add((patterns[i]['stock'], patterns[i]['date']))
-        if pattern_type == 'up':
-            self._clustered_up_keys = clustered_keys
-        else:
-            self._clustered_down_keys = clustered_keys
-        
-        n_noise = int((labels == -1).sum())
-        n_clustered = len(labels) - n_noise
-        print(f"  DBSCAN ({pattern_type}): {n_clustered} 樣本屬於群組, {n_noise} 噪音點")
         
         # 分析每個群組
         selected = []
@@ -598,40 +536,9 @@ class PatternSelector:
             'up_patterns': len(self.selected_patterns['up']),
             'down_patterns': len(self.selected_patterns['down']),
             'top_up': self.selected_patterns['up'][:5] if self.selected_patterns['up'] else [],
-            'top_down': self.selected_patterns['down'][:5] if self.selected_patterns['down'] else [],
-            'clustered_up_count': len(self._clustered_up_keys),
-            'clustered_down_count': len(self._clustered_down_keys),
+            'top_down': self.selected_patterns['down'][:5] if self.selected_patterns['down'] else []
         }
         return summary
-    
-    def filter_training_data(self, train_stock_data):
-        """
-        用 DBSCAN 聚類結果過濾訓練資料，只保留屬於型態群組的高品質樣本。
-        將 Step 1 的篩選結果傳遞給 Step 2 / Step 3。
-        
-        Args:
-            train_stock_data: dict {stock_code: train_df}
-        Returns:
-            DataFrame: 只含屬於聚類群組的 Label=1/-1 樣本
-        """
-        all_keys = self._clustered_up_keys | self._clustered_down_keys
-        filtered_dfs = []
-        
-        for stock, df in train_stock_data.items():
-            # 用 index intersection 取代嵌套 for loop
-            stock_dates = {date for (s, date) in all_keys if s == stock}
-            if stock_dates:
-                matched_idx = df.index.intersection(list(stock_dates))
-                if len(matched_idx) > 0:
-                    filtered_dfs.append(df.loc[matched_idx])
-        
-        if filtered_dfs:
-            result = pd.concat(filtered_dfs, ignore_index=True)
-            print(f"✓ 型態篩選後訓練樣本: {len(result)} 筆 "
-                  f"(上漲 {len(self._clustered_up_keys)}, 下跌 {len(self._clustered_down_keys)})")
-            return result
-        
-        return pd.DataFrame()
 
 
 # ==================== ModelEngine 類別 ====================
@@ -640,26 +547,119 @@ class ModelEngine:
     
     def __init__(self, feature_columns):
         self.feature_columns = feature_columns
-        self.scaler = StandardScaler()  # 統一的特徵標準化器
-        # 統一的 Autoencoder（處理所有訓練資料）
-        self.autoencoder = None
-        self.encoder = None
-        self.history = None
-        # 在統一 Latent Space 上的兩個 OC-SVM
+        self.scaler = StandardScaler()
+        self.scaler_up = StandardScaler()
+        self.scaler_down = StandardScaler()
+        # Latent Code 專用標準化器（讓 OC-SVM 決策分數可比較）
+        self.latent_scaler_up = StandardScaler()
+        self.latent_scaler_down = StandardScaler()
+        # 兩個Autoencoder：一個學上漲、一個學下跌
+        self.autoencoder_up = None
+        self.autoencoder_down = None
+        self.encoder_up = None
+        self.encoder_down = None
         self.svm_up = None
         self.svm_down = None
-        # Latent Code 標準化器（讓 OC-SVM 在同一基準上訓練）
-        self.latent_scaler = StandardScaler()
+        self.train_features_up = None
+        self.train_features_down = None
+        self.history_up = None
+        self.history_down = None
+        
+    # ========== 加分項目 1：特徵權重 ==========
+    def get_feature_weights(self, train_df):
+        """
+        使用 Random Forest 計算特徵重要性作為權重
+        
+        Args:
+            train_df: 訓練資料
+            
+        Returns:
+            weights: 特徵權重陣列
+        """
+        # 準備訓練數據
+        X = train_df[self.feature_columns].values
+        y = train_df['Label'].values
+        
+        # 只使用有標籤的樣本（排除0）
+        mask = y != 0
+        X_filtered = X[mask]
+        y_filtered = y[mask]
+        
+        if len(X_filtered) < 10:
+            # 數據太少，返回均勻權重
+            return np.ones(len(self.feature_columns))
+        
+        # 訓練 Random Forest
+        rf = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=10)
+        rf.fit(X_filtered, y_filtered)
+        
+        # 取得特徵重要性
+        weights = rf.feature_importances_
+        
+        # 正規化權重（確保不為0）
+        weights = weights / (weights.sum() + 1e-10)
+        weights = np.maximum(weights, 0.01)  # 避免權重過小
+        
+        print(f"特徵權重: {dict(zip(self.feature_columns, weights.round(3)))}")
+        
+        return weights
     
-    # ========== Autoencoder 建立與訓練 ==========
-    def build_autoencoder(self, input_dim=22):
+    # ========== 方法一：相似度比對（支援加權）==========
+    def euclidean_predict(self, train_df, test_df, weights=None):
+        """
+        使用加權歐式距離找出最相似的歷史型態
+        
+        Args:
+            train_df: 訓練資料
+            test_df: 測試資料
+            weights: 特徵權重陣列（若為None則使用均勻權重）
+            
+        Returns:
+            predictions: 預測結果 (1=漲, -1=跌)
+        """
+        # 設定權重
+        if weights is None:
+            weights = np.ones(len(self.feature_columns))
+        
+        # 取得大漲和大跌的樣本
+        up_samples = train_df[train_df['Label'] == 1][self.feature_columns].values
+        down_samples = train_df[train_df['Label'] == -1][self.feature_columns].values
+        
+        predictions = []
+        
+        for _, row in test_df.iterrows():
+            test_vec = row[self.feature_columns].values
+            
+            # 計算與大漲樣本的最小加權距離
+            min_up_dist = np.inf
+            if len(up_samples) > 0:
+                # 加權歐式距離
+                weighted_dists = [np.sqrt(np.sum(weights * (test_vec - up_vec)**2)) for up_vec in up_samples]
+                min_up_dist = min(weighted_dists)
+            
+            # 計算與大跌樣本的最小加權距離
+            min_down_dist = np.inf
+            if len(down_samples) > 0:
+                weighted_dists = [np.sqrt(np.sum(weights * (test_vec - down_vec)**2)) for down_vec in down_samples]
+                min_down_dist = min(weighted_dists)
+            
+            # 距離較小者為預測結果
+            if min_up_dist < min_down_dist:
+                predictions.append(1)
+            else:
+                predictions.append(-1)
+        
+        return np.array(predictions)
+    
+    # ========== 方法二：Autoencoder ==========
+    def build_autoencoder(self, input_dim=10):
         """
         建立 Autoencoder 模型
         架構: Input -> Dense(16) -> Dense(4, latent) -> Dense(16) -> Output
         Latent 維度固定 4：壓縮至 4 維以保留時間序列慣性特徵
         
         Args:
-            input_dim: 輸入維度（統計聚合版 = 11特徵 × 2統計量 = 22）
+            input_dim: 輸入維度（= WINDOW_SIZE × 11 = 33）
             
         Returns:
             autoencoder, encoder
@@ -681,138 +681,296 @@ class ModelEngine:
         
         return autoencoder, encoder
     
-    def train_autoencoder(self, train_df, epochs=50, batch_size=32):
+    def train_autoencoder(self, train_df, epochs=50, batch_size=32,
+                          lambda_contrast=0.5, margin=0.5):
         """
-        訓練一個統一的 Autoencoder（處理所有訓練資料）
-        解決問題：兩個獨立的 AE 會產生不同的 Latent Space，
-        導致 OC-SVM 的 decision_function 分數無法直接比較。
+        訓練兩個含【對比損失（Contrastive Loss）】的 Autoencoder
         
-        新架構：
-        1. 使用所有訓練資料（上漲 + 下跌）訓練一個統一的 AE
-        2. 提取統一的 Latent Space（4 維）
-        3. 在這個統一空間上分別訓練兩個 OC-SVM（上漲、下跌）
+        設計原理：
+        ─ AE-上漲：對「帶量突破」型態重構誤差極低，且遠離下跌型態
+        ─ AE-下跌：對「放量下挫」型態重構誤差極低，且遠離上漲型態
+        
+        對比損失公式：
+            L = MSE(same_class) + λ × max(0, margin − MSE_opp)
+        即：在同類誤差夠小的前提下，強制讓異類誤差 ≥ margin，
+        等效於將兩類在 Latent Space 中推開。
         
         Args:
-            train_df: 訓練資料（含 Label 欄位）
-            epochs: 訓練輪數
-            batch_size: 批次大小
-        """
-        # 收集所有有標籤的樣本（Label = 1 或 -1）
-        labeled_samples = train_df[train_df['Label'] != 0][self.feature_columns].values
-        
-        if len(labeled_samples) < 10:
-            print("⚠️ 訓練樣本不足，無法訓練 Autoencoder")
-            return
-        
-        print(f"統一 AE 訓練：共 {len(labeled_samples)} 個樣本")
-        
-        # 統一標準化（所有樣本使用同一個 scaler）
-        X_scaled = self.scaler.fit_transform(labeled_samples)
-        
-        # ── 切分訓練 / 驗證集 ──────────────────────
-        from sklearn.model_selection import train_test_split
-        _use_val = len(X_scaled) >= 20
-        if _use_val:
-            X_train, X_val = train_test_split(
-                X_scaled, test_size=0.2, random_state=RANDOM_SEED)
-            print(f"  驗證集切分：訓練 {len(X_train)}, 驗證 {len(X_val)}")
-        else:
-            X_train, X_val = X_scaled, None
-        
-        # ── 建立統一的 Autoencoder ──────────────────
-        self.autoencoder, self.encoder = self.build_autoencoder(len(self.feature_columns))
-        self.autoencoder.compile(optimizer='adam', loss='mse')
-        
-        # ── 訓練 ──────────────────────────────────────
-        history = self.autoencoder.fit(
-            X_train, X_train,
-            epochs=epochs,
-            batch_size=min(batch_size, len(X_train)),
-            validation_data=(X_val, X_val) if _use_val else None,
-            verbose=0
-        )
-        
-        # 儲存訓練歷史
-        class _HistoryWrapper:
-            def __init__(self, hist):
-                self.history = hist
-        
-        self.history = _HistoryWrapper(history.history)
-        
-        train_loss = history.history['loss'][-1]
-        msg = f"✓ 統一 AE 訓練完成 (最終訓練損失: {train_loss:.6f}"
-        if _use_val and 'val_loss' in history.history:
-            val_loss = history.history['val_loss'][-1]
-            msg += f", 驗證損失: {val_loss:.6f}"
-        msg += ")"
-        print(msg)
-        print("  優勢：所有樣本共享同一個 Latent Space，OC-SVM 分數具可比性")
-    
-    def _train_autoencoder_legacy(self, train_df, epochs=50, batch_size=32):
-        """
-        舊版：訓練兩個獨立的 Autoencoder（已廢棄，保留供參考）
-        問題：兩個獨立的 latent space 導致 OC-SVM 分數不可比
+            train_df:        訓練資料（含 Label 欄位）
+            epochs:          訓練輪數
+            batch_size:      批次大小
+            lambda_contrast: 對比損失權重（預設 0.5）
+            margin:          對比損失 margin（預設 0.5）
         """
         # 分別取出大漲和大跌的樣本
         up_samples   = train_df[train_df['Label'] == 1][self.feature_columns].values
         down_samples = train_df[train_df['Label'] == -1][self.feature_columns].values
         
-        print(f"[舊版] 對比損失 AE 訓練：上漲樣本 {len(up_samples)}, 下跌樣本 {len(down_samples)}")
-        print("  警告：此方法已廢棄，請使用統一 AE 架構")
+        print(f"對比損失 AE 訓練：上漲樣本 {len(up_samples)}, 下跌樣本 {len(down_samples)}")
         
-        # 後續代碼省略...
-        pass
+        if len(up_samples) == 0 or len(down_samples) == 0:
+            print("⚠️ 樣本不足，改用標準 MSE 訓練")
+            self._train_autoencoder_standard(train_df, epochs, batch_size)
+            return
+        
+        # 分別標準化（scaler_up 只fit上漲樣本，這樣下漲樣本通過scaler_up會有自然偏移）
+        X_up_scaled   = self.scaler_up.fit_transform(up_samples)
+        X_down_for_up = self.scaler_up.transform(down_samples)   # 用同一個 scaler 轉換異類
+        
+        X_down_scaled  = self.scaler_down.fit_transform(down_samples)
+        X_up_for_down  = self.scaler_down.transform(up_samples)  # 用同一個 scaler 轉換異類
+        
+        # ── 資料解耦：80/20 切分訓練 / 驗證集 ──────────────────────
+        from sklearn.model_selection import train_test_split
+        _use_val = len(X_up_scaled) >= 10 and len(X_down_scaled) >= 10
+        if _use_val:
+            X_up_train, X_up_val = train_test_split(
+                X_up_scaled, test_size=0.2, random_state=RANDOM_SEED)
+            X_down_train, X_down_val = train_test_split(
+                X_down_scaled, test_size=0.2, random_state=RANDOM_SEED)
+            print(f"  驗證集切分：上漲 {len(X_up_train)}/{len(X_up_val)}, "
+                  f"下跌 {len(X_down_train)}/{len(X_down_val)} (train/val)")
+        else:
+            X_up_train, X_up_val = X_up_scaled, None
+            X_down_train, X_down_val = X_down_scaled, None
+        
+        # 建立模型與優化器
+        self.autoencoder_up,   self.encoder_up   = self.build_autoencoder(len(self.feature_columns))
+        self.autoencoder_down, self.encoder_down = self.build_autoencoder(len(self.feature_columns))
+        
+        optimizer_up   = keras.optimizers.Adam(learning_rate=1e-3)
+        optimizer_down = keras.optimizers.Adam(learning_rate=1e-3)
+        
+        history_up_loss   = []
+        history_down_loss = []
+        history_up_val_loss   = []
+        history_down_val_loss = []
+        
+        n_up_train   = len(X_up_train)
+        n_down_train = len(X_down_train)
+        n_opp_for_up   = len(X_down_for_up)    # 異類全集用於對比抽樣
+        n_opp_for_down = len(X_up_for_down)
+        
+        # ── 訓練迴圈 ──────────────────────────────────────────────────
+        for epoch in range(epochs):
+            # ── AE-up：以上漲樣本為主，對比下漲樣本 ──────────────────
+            perm = np.random.permutation(n_up_train)
+            epoch_loss_up = []
+            for start in range(0, n_up_train, batch_size):
+                idx = perm[start:start + batch_size]
+                x_same = tf.constant(X_up_train[idx], dtype=tf.float32)
+                # 從異類隨機取相同批次大小（允許重複抽樣）
+                idx_opp = np.random.choice(n_opp_for_up, size=len(idx), replace=True)
+                x_opp = tf.constant(X_down_for_up[idx_opp], dtype=tf.float32)
+                
+                with tf.GradientTape() as tape:
+                    recon_same = self.autoencoder_up(x_same, training=True)
+                    recon_opp  = self.autoencoder_up(x_opp,  training=True)
+                    
+                    loss_same     = tf.reduce_mean(tf.square(x_same - recon_same))
+                    mse_opp_each  = tf.reduce_mean(tf.square(x_opp - recon_opp), axis=1)
+                    loss_contrast = tf.reduce_mean(tf.maximum(0.0, margin - mse_opp_each))
+                    total_loss    = loss_same + lambda_contrast * loss_contrast
+                
+                grads = tape.gradient(total_loss, self.autoencoder_up.trainable_variables)
+                optimizer_up.apply_gradients(zip(grads, self.autoencoder_up.trainable_variables))
+                epoch_loss_up.append(float(total_loss))
+            history_up_loss.append(float(np.mean(epoch_loss_up)))
+            
+            # ── AE-down：以下跌樣本為主，對比上漲樣本 ──────────────
+            perm = np.random.permutation(n_down_train)
+            epoch_loss_down = []
+            for start in range(0, n_down_train, batch_size):
+                idx = perm[start:start + batch_size]
+                x_same = tf.constant(X_down_train[idx], dtype=tf.float32)
+                idx_opp = np.random.choice(n_opp_for_down, size=len(idx), replace=True)
+                x_opp = tf.constant(X_up_for_down[idx_opp], dtype=tf.float32)
+                
+                with tf.GradientTape() as tape:
+                    recon_same = self.autoencoder_down(x_same, training=True)
+                    recon_opp  = self.autoencoder_down(x_opp,  training=True)
+                    
+                    loss_same     = tf.reduce_mean(tf.square(x_same - recon_same))
+                    mse_opp_each  = tf.reduce_mean(tf.square(x_opp - recon_opp), axis=1)
+                    loss_contrast = tf.reduce_mean(tf.maximum(0.0, margin - mse_opp_each))
+                    total_loss    = loss_same + lambda_contrast * loss_contrast
+                
+                grads = tape.gradient(total_loss, self.autoencoder_down.trainable_variables)
+                optimizer_down.apply_gradients(zip(grads, self.autoencoder_down.trainable_variables))
+                epoch_loss_down.append(float(total_loss))
+            history_down_loss.append(float(np.mean(epoch_loss_down)))
+            
+            # ── 無梯度驗證：純 MSE 重構誤差 ──────────────────────────
+            if _use_val:
+                recon_up_val = self.autoencoder_up(
+                    tf.constant(X_up_val, dtype=tf.float32), training=False)
+                val_loss_up = float(tf.reduce_mean(tf.square(X_up_val - recon_up_val)))
+                history_up_val_loss.append(val_loss_up)
+                
+                recon_down_val = self.autoencoder_down(
+                    tf.constant(X_down_val, dtype=tf.float32), training=False)
+                val_loss_down = float(tf.reduce_mean(tf.square(X_down_val - recon_down_val)))
+                history_down_val_loss.append(val_loss_down)
+            
+            if (epoch + 1) % 10 == 0:
+                msg = (f"  Epoch {epoch+1:3d}/{epochs} — "
+                       f"Up Loss: {history_up_loss[-1]:.6f}, "
+                       f"Down Loss: {history_down_loss[-1]:.6f}")
+                if _use_val:
+                    msg += (f" | Val Up: {history_up_val_loss[-1]:.6f}, "
+                            f"Val Down: {history_down_val_loss[-1]:.6f}")
+                print(msg)
+        
+        # 包裝成 Keras history-like 物件供後續監控
+        class _HistoryWrapper:
+            def __init__(self, losses, val_losses=None):
+                self.history = {'loss': losses}
+                if val_losses:
+                    self.history['val_loss'] = val_losses
+        
+        self.history_up   = _HistoryWrapper(history_up_loss, history_up_val_loss or None)
+        self.history_down = _HistoryWrapper(history_down_loss, history_down_val_loss or None)
+        
+        _up_msg = f"✓ 上漲 AE (含對比損失) 訓練完成 (最終損失: {history_up_loss[-1]:.6f}"
+        if history_up_val_loss:
+            _up_msg += f", 驗證損失: {history_up_val_loss[-1]:.6f}"
+        _up_msg += ")"
+        print(_up_msg)
+        
+        _down_msg = f"✓ 下跌 AE (含對比損失) 訓練完成 (最終損失: {history_down_loss[-1]:.6f}"
+        if history_down_val_loss:
+            _down_msg += f", 驗證損失: {history_down_val_loss[-1]:.6f}"
+        _down_msg += ")"
+        print(_down_msg)
     
-    def get_latent_code(self, df):
+    def _train_autoencoder_standard(self, train_df, epochs=50, batch_size=32):
+        """備用：標準 MSE Autoencoder（當某一類樣本不足時使用）"""
+        up_samples   = train_df[train_df['Label'] == 1][self.feature_columns].values
+        down_samples = train_df[train_df['Label'] == -1][self.feature_columns].values
+        
+        if len(up_samples) > 0:
+            X_up_scaled = self.scaler_up.fit_transform(up_samples)
+            self.autoencoder_up, self.encoder_up = self.build_autoencoder(len(self.feature_columns))
+            self.autoencoder_up.compile(optimizer='adam', loss='mse')
+            h = self.autoencoder_up.fit(X_up_scaled, X_up_scaled, epochs=epochs,
+                                        batch_size=min(batch_size, len(up_samples)),
+                                        validation_split=0.2 if len(up_samples) > 10 else 0,
+                                        verbose=0)
+            class _H:
+                def __init__(self, hist): self.history = hist
+            self.history_up = _H(h.history)
+            print(f"✓ 上漲型態 AE 訓練完成 (MSE: {h.history['loss'][-1]:.6f})")
+        
+        if len(down_samples) > 0:
+            X_down_scaled = self.scaler_down.fit_transform(down_samples)
+            self.autoencoder_down, self.encoder_down = self.build_autoencoder(len(self.feature_columns))
+            self.autoencoder_down.compile(optimizer='adam', loss='mse')
+            h = self.autoencoder_down.fit(X_down_scaled, X_down_scaled, epochs=epochs,
+                                          batch_size=min(batch_size, len(down_samples)),
+                                          validation_split=0.2 if len(down_samples) > 10 else 0,
+                                          verbose=0)
+            class _H:
+                def __init__(self, hist): self.history = hist
+            self.history_down = _H(h.history)
+            print(f"✓ 下跌型態 AE 訓練完成 (MSE: {h.history['loss'][-1]:.6f})")
+    
+    def get_latent_code(self, df, model_type='up'):
         """
         取得 Latent Code (4維壓縮特徵)
-        使用統一的 encoder 提取特徵
         
         Args:
             df: 資料
+            model_type: 'up' 或 'down'，指定使用哪個模型
             
         Returns:
             latent_code: 4維特徵向量
         """
         X = df[self.feature_columns].values
         
-        if self.encoder is None:
-            print("警告：模型尚未訓練，返回零向量")
-            return np.zeros((len(df), 4))
-        
-        # 使用統一的 scaler 轉換
-        X_scaled = self.scaler.transform(X)
-        latent_code = self.encoder.predict(X_scaled, verbose=0)
+        if model_type == 'up' and self.encoder_up is not None:
+            X_scaled = self.scaler_up.transform(X)
+            latent_code = self.encoder_up.predict(X_scaled, verbose=0)
+        elif model_type == 'down' and self.encoder_down is not None:
+            X_scaled = self.scaler_down.transform(X)
+            latent_code = self.encoder_down.predict(X_scaled, verbose=0)
+        else:
+            # 備用：使用上漲模型
+            X_scaled = self.scaler_up.transform(X)
+            latent_code = self.encoder_up.predict(X_scaled, verbose=0)
         
         return latent_code
     
-    def get_reconstruction_error(self, df):
+    def get_reconstruction_error(self, df, model_type='up'):
         """
         計算重建誤差（MSE）
-        使用統一的 autoencoder
         
         Args:
             df: 資料
-        
+            model_type: 'up' 或 'down'
+            
         Returns:
-            reconstruction_error: 重建誤差陣列
+            reconstruction_errors: 每個樣本的重建誤差
         """
         X = df[self.feature_columns].values
         
-        if self.autoencoder is None:
-            print("警告：模型尚未訓練，返回零向量")
+        if model_type == 'up' and self.autoencoder_up is not None:
+            X_scaled = self.scaler_up.transform(X)
+            X_reconstructed = self.autoencoder_up.predict(X_scaled, verbose=0)
+        elif model_type == 'down' and self.autoencoder_down is not None:
+            X_scaled = self.scaler_down.transform(X)
+            X_reconstructed = self.autoencoder_down.predict(X_scaled, verbose=0)
+        else:
             return np.zeros(len(df))
         
-        # 使用統一的 scaler 轉換
-        X_scaled = self.scaler.transform(X)
-        reconstructed = self.autoencoder.predict(X_scaled, verbose=0)
-        
-        # 計算 MSE（每個樣本的平均平方誤差）
-        error = np.mean((X_scaled - reconstructed) ** 2, axis=1)
-        
-        return latent_code
+        # 計算每個樣本的MSE
+        errors = np.mean((X_scaled - X_reconstructed) ** 2, axis=1)
+        return errors
     
-    # ========== One-Class SVM 訓練與預測 ==========
+    def autoencoder_predict(self, train_df, test_df, confidence_threshold=0.05):
+        """
+        方法二：使用 Autoencoder 的重建誤差進行預測（加入信心度閾值機制）
+        邏輯：重建誤差小 = 與該型態相符
+        
+        Args:
+            train_df: 訓練資料（未使用，保留接口一致性）
+            test_df: 測試資料
+            confidence_threshold: 信心度閾值（相對誤差差距）
+            
+        Returns:
+            predictions: 預測結果 (1=漲, -1=跌, 0=觀望)
+        """
+        # 計算測試集在兩個模型上的重建誤差
+        error_up = self.get_reconstruction_error(test_df, model_type='up')
+        error_down = self.get_reconstruction_error(test_df, model_type='down')
+        
+        predictions = []
+        
+        for i in range(len(test_df)):
+            # 計算兩個誤差的平均值
+            avg_error = (error_up[i] + error_down[i]) / 2
+            
+            # 如果平均誤差太高，表示市場混亂，不做預測
+            if avg_error > 0.5:  # 絕對誤差閾值
+                predictions.append(0)  # 觀望
+                continue
+            
+            # 計算相對差距
+            if avg_error > 0:
+                relative_diff = abs(error_up[i] - error_down[i]) / avg_error
+            else:
+                relative_diff = 0
+            
+            # 如果兩個誤差差距太小，表示信心度不足，觀望
+            if relative_diff < confidence_threshold:
+                predictions.append(0)  # 觀望
+            elif error_up[i] < error_down[i]:
+                predictions.append(1)  # 上漲型態的誤差較小且信心度足夠 -> 預測上漲
+            else:
+                predictions.append(-1)  # 下跌型態的誤差較小且信心度足夠 -> 預測下跌
+        
+        return np.array(predictions)
+    
+    # ========== 方法三：One-Class SVM ==========
     def train_one_class_svm(self, train_df):
         """
         訓練兩個 One-Class SVM (一個學習上漲、一個學習下跌)
@@ -831,9 +989,9 @@ class ModelEngine:
         up_samples = train_df[train_df['Label'] == 1]
         down_samples = train_df[train_df['Label'] == -1]
         
-        # 取得對應的 Latent Code (使用統一 AE 編碼後的 4 維特徵)
-        latent_up = self.get_latent_code(up_samples) if len(up_samples) > 0 else np.array([])
-        latent_down = self.get_latent_code(down_samples) if len(down_samples) > 0 else np.array([])
+        # 取得對應的 Latent Code (使用 AE 編碼後的 4 維特徵)
+        latent_up = self.get_latent_code(up_samples, model_type='up') if len(up_samples) > 0 else np.array([])
+        latent_down = self.get_latent_code(down_samples, model_type='down') if len(down_samples) > 0 else np.array([])
         
         # 訓練 SVM (nu=0.1 表示預期 10% 的樣本為異常值)
         self.svm_up = OneClassSVM(kernel='rbf', gamma='auto', nu=0.1)
@@ -866,16 +1024,23 @@ class ModelEngine:
         Returns:
             predictions: 預測結果 (1=上漲, -1=下跌, 0=觀望)
         """
-        # 使用統一模型的 latent code（兩個SVM都用同一組特徵）
-        latent_code = self.get_latent_code(test_df)
+        # 分別取得兩個模型的 latent code
+        latent_code_up   = self.get_latent_code(test_df, model_type='up')
+        latent_code_down = self.get_latent_code(test_df, model_type='down')
         
         predictions = []
         for i in range(len(test_df)):
-            lc = latent_code[i].reshape(1, -1)
+            lc_up   = latent_code_up[i].reshape(1, -1)
+            lc_down = latent_code_down[i].reshape(1, -1)
             
-            # 使用統一的 latent code 分別計算兩個 SVM 的分數
-            up_score   = self.svm_up.decision_function(lc)[0]   if self.svm_up   else -np.inf
-            down_score = self.svm_down.decision_function(lc)[0] if self.svm_down else -np.inf
+            # 推論時用訓練階段 fit 好的 latent scaler 做標準化
+            if hasattr(self.latent_scaler_up, 'mean_'):
+                lc_up = self.latent_scaler_up.transform(lc_up)
+            if hasattr(self.latent_scaler_down, 'mean_'):
+                lc_down = self.latent_scaler_down.transform(lc_down)
+            
+            up_score   = self.svm_up.decision_function(lc_up)[0]   if self.svm_up   else -np.inf
+            down_score = self.svm_down.decision_function(lc_down)[0] if self.svm_down else -np.inf
             
             diff = up_score - down_score
             
@@ -885,6 +1050,192 @@ class ModelEngine:
                 predictions.append(1)   # 上漲訊號
             else:
                 predictions.append(-1)  # 下跌訊號
+        
+        return np.array(predictions)
+    
+    # ========== 方法四：基因演算法 (GA) ==========
+    def genetic_algorithm(self, train_df, population_size=50, generations=30):
+        """
+        使用基因演算法搜尋最佳 K 線特徵組合
+        
+        Args:
+            train_df: 訓練資料
+            population_size: 種群大小
+            generations: 世代數
+            
+        Returns:
+            best_pattern: 最佳型態向量
+        """
+        print("開始執行基因演算法...")
+        
+        # 初始化種群
+        population = self._initialize_population(train_df, population_size)
+        
+        best_fitness = -np.inf
+        best_pattern = None
+        
+        for gen in range(generations):
+            # 計算適應度
+            fitness_scores = [self._fitness_function(pattern, train_df) for pattern in population]
+            
+            # 記錄最佳解
+            max_idx = np.argmax(fitness_scores)
+            if fitness_scores[max_idx] > best_fitness:
+                best_fitness = fitness_scores[max_idx]
+                best_pattern = population[max_idx].copy()
+            
+            # 選擇
+            selected = self._selection(population, fitness_scores)
+            
+            # 交叉與突變
+            population = self._crossover_and_mutation(selected)
+            
+            if (gen + 1) % 10 == 0:
+                print(f"Generation {gen+1}/{generations}, Best Fitness: {best_fitness:.4f}")
+        
+        self.best_ga_pattern = best_pattern
+        return best_pattern
+    
+    def _initialize_population(self, train_df, size):
+        """初始化種群"""
+        # 從訓練集中隨機選擇大漲或大跌的樣本作為初始種群
+        extreme_samples = train_df[(train_df['Label'] == 1) | (train_df['Label'] == -1)]
+        
+        if len(extreme_samples) < size:
+            # 如果樣本不足，進行複製
+            indices = np.random.choice(len(extreme_samples), size, replace=True)
+        else:
+            indices = np.random.choice(len(extreme_samples), size, replace=False)
+        
+        population = []
+        for idx in indices:
+            pattern = extreme_samples.iloc[idx][self.feature_columns].values
+            population.append(pattern)
+        
+        return population
+    
+    def _fitness_function(self, pattern, train_df):
+        """
+        適應度函數：考慮出現次數、平均獲利、最大回撤
+        
+        Args:
+            pattern: 特徵向量
+            train_df: 訓練資料
+            
+        Returns:
+            fitness: 適應度分數
+        """
+        # 計算與訓練集所有樣本的距離
+        X_train = train_df[self.feature_columns].values
+        distances = np.array([euclidean(pattern, x) for x in X_train])
+        
+        # 找出相似的樣本 (距離閾值)
+        threshold = np.percentile(distances, 10)  # 前 10% 最相似的
+        similar_indices = distances < threshold
+        
+        if similar_indices.sum() == 0:
+            return -1000  # 懲罰沒有相似樣本的情況
+        
+        similar_samples = train_df[similar_indices]
+        
+        # 1. 出現次數
+        occurrence = len(similar_samples)
+        if occurrence < 5:
+            return -1000  # 不符合條件
+        
+        # 2. 平均獲利
+        avg_profit = similar_samples['三天後漲跌(%)'].mean()
+        if avg_profit < 3:
+            return -500  # 不符合條件
+        
+        # 3. 最大回撤 (簡化計算：使用三天後漲跌的最小值)
+        max_drawdown = abs(similar_samples['三天後漲跌(%)'].min())
+        if max_drawdown > 3:
+            max_drawdown_penalty = -max_drawdown * 10
+        else:
+            max_drawdown_penalty = 0
+        
+        # 綜合適應度
+        fitness = occurrence * 0.5 + avg_profit * 10 + max_drawdown_penalty
+        
+        return fitness
+    
+    def _selection(self, population, fitness_scores):
+        """選擇操作：輪盤賭選擇"""
+        fitness_scores = np.array(fitness_scores)
+        
+        # 處理負數適應度
+        min_fitness = fitness_scores.min()
+        if min_fitness < 0:
+            fitness_scores = fitness_scores - min_fitness + 1
+        
+        # 計算選擇概率
+        total_fitness = fitness_scores.sum()
+        if total_fitness == 0:
+            probabilities = np.ones(len(population)) / len(population)
+        else:
+            probabilities = fitness_scores / total_fitness
+        
+        # 選擇
+        selected_indices = np.random.choice(len(population), size=len(population), p=probabilities)
+        selected = [population[i] for i in selected_indices]
+        
+        return selected
+    
+    def _crossover_and_mutation(self, selected):
+        """交叉與突變操作"""
+        new_population = []
+        
+        for i in range(0, len(selected), 2):
+            parent1 = selected[i]
+            parent2 = selected[i+1] if i+1 < len(selected) else selected[0]
+            
+            # 單點交叉
+            crossover_point = np.random.randint(1, len(parent1))
+            child1 = np.concatenate([parent1[:crossover_point], parent2[crossover_point:]])
+            child2 = np.concatenate([parent2[:crossover_point], parent1[crossover_point:]])
+            
+            # 突變 (10% 機率)
+            if np.random.rand() < 0.1:
+                mutation_point = np.random.randint(len(child1))
+                child1[mutation_point] += np.random.randn() * 0.1
+            
+            if np.random.rand() < 0.1:
+                mutation_point = np.random.randint(len(child2))
+                child2[mutation_point] += np.random.randn() * 0.1
+            
+            new_population.append(child1)
+            new_population.append(child2)
+        
+        return new_population[:len(selected)]
+    
+    def ga_predict(self, test_df, similarity_threshold=5.0):
+        """
+        使用 GA 找到的最佳型態進行預測（修正邏輯：不匹配=觀望，而非做空）
+        
+        Args:
+            test_df: 測試資料
+            similarity_threshold: 相似度閾值（歐式距離）
+            
+        Returns:
+            predictions: 預測結果 (1=漲, 0=觀望)
+        """
+        if not hasattr(self, 'best_ga_pattern'):
+            return np.zeros(len(test_df))
+        
+        X_test = test_df[self.feature_columns].values
+        predictions = []
+        
+        for x in X_test:
+            dist = euclidean(self.best_ga_pattern, x)
+            
+            # 修正邏輯：只有符合最佳型態時才做多
+            # 不符合時保持觀望（0），而非做空（-1）
+            # 理由：「不是上漲型態」不等於「是下跌型態」
+            if dist < similarity_threshold:  # 相似度高，預測上漲
+                predictions.append(1)
+            else:
+                predictions.append(0)  # 不符合型態，觀望（關鍵修正）
         
         return np.array(predictions)
 
@@ -968,24 +1319,22 @@ class Backtester:
             if prediction == 0:
                 continue
             
-            # 檢查是否有足夠的未來資料（需要至少4筆：隔天進場 + 3天持有）
-            if i + 4 >= len(test_df):
+            # 檢查是否有足夠的未來資料（需要至少1筆）
+            if i + 1 >= len(test_df):
                 continue
             
-            # ── 修正未來函數：進場價改為隔天開盤價 ──────────────────────
-            entry_price = test_df.iloc[i + 1]['Open']  # 進場價：訊號日的隔天開盤價
+            entry_price = test_df.iloc[i]['Close']  # 進場價：當日收盤價
             
-            # ── 追蹤止損：在進場後的 1~3 天（共 3 個交易日）逐日檢查是否觸及止損 ──────────
-            # i+1 是進場日，i+2 到 i+4 是持倉期（3天）
-            exit_price = test_df.iloc[min(i + 4, len(test_df) - 1)]['Close']  # 預設第3天收盤出場
+            # ── 追蹤止損：在 1~3 天內逐日檢查是否觸及止損 ──────────
+            exit_price = test_df.iloc[min(i + 3, len(test_df) - 1)]['Close']  # 預設3天後
             peak_price = entry_price  # 追蹤高峰（做多）/ 低點（做空）
             
             if prediction == 1:
                 # 做多：監控最高價，若收盤從高峰回落 ≥ 2% 則提前出場
-                for day in range(1, 4):  # day=1,2,3 對應 i+2, i+3, i+4
-                    if i + 1 + day >= len(test_df):
+                for day in range(1, 4):
+                    if i + day >= len(test_df):
                         break
-                    day_close = test_df.iloc[i + 1 + day]['Close']
+                    day_close = test_df.iloc[i + day]['Close']
                     peak_price = max(peak_price, day_close)   # 更新追蹤高峰
                     drawdown_from_peak = (peak_price - day_close) / peak_price
                     if drawdown_from_peak >= trailing_stop_pct:
@@ -997,10 +1346,10 @@ class Backtester:
             elif prediction == -1:
                 # 做空：監控最低價，若收盤從低點反彈 ≥ 2% 則提前回補
                 trough_price = entry_price
-                for day in range(1, 4):  # day=1,2,3 對應 i+2, i+3, i+4
-                    if i + 1 + day >= len(test_df):
+                for day in range(1, 4):
+                    if i + day >= len(test_df):
                         break
-                    day_close = test_df.iloc[i + 1 + day]['Close']
+                    day_close = test_df.iloc[i + day]['Close']
                     trough_price = min(trough_price, day_close)  # 更新追蹤低點
                     rebound_from_trough = (day_close - trough_price) / trough_price
                     if rebound_from_trough >= trailing_stop_pct:
@@ -1403,9 +1752,7 @@ class App:
             
             self.update_status(
                 f"✅ [Step 1 完成] 找到 {pattern_summary['up_patterns']} 個上漲型態, "
-                f"{pattern_summary['down_patterns']} 個下跌型態 "
-                f"(聚類樣本: 上漲 {pattern_summary['clustered_up_count']}, "
-                f"下跌 {pattern_summary['clustered_down_count']})"
+                f"{pattern_summary['down_patterns']} 個下跌型態"
             )
             
             # 1-3. 抓取目標股票資料並計算特徵
@@ -1434,34 +1781,29 @@ class App:
             # 2-1. 初始化模型引擎
             self.model_engine = ModelEngine(self.data_processor.feature_columns)
             
-            # 2-2. 用 Step 1 篩選結果過濾訓練資料，只保留屬於型態群組的高品質樣本
-            self.update_status("🔄 使用 Step 1 篩選後的型態樣本訓練 Contrastive AE（λ=0.5, margin=0.5）...")
+            # 2-2. 合併同產業資料進行 AE 預訓練
+            self.update_status("🔄 使用同產業資料訓練 Contrastive AE（λ=0.5, margin=0.5）...")
             
-            filtered_train_data = pattern_selector.filter_training_data(train_stock_data)
-            all_train_raw = pd.concat([df for df in train_stock_data.values()], ignore_index=True)
+            # 合併所有股票的訓練資料
+            all_train_data = pd.concat([df for df in train_stock_data.values()], ignore_index=True)
+            self.update_status(f"📊 同產業訓練樣本總數: {len(all_train_data)} 筆")
             
-            if len(filtered_train_data) >= 100:
-                all_train_data = filtered_train_data
-                self.update_status(
-                    f"📊 型態篩選後訓練樣本: {len(all_train_data)} 筆 "
-                    f"(原始 {len(all_train_raw)} 筆，只保留聚類型態)"
-                )
-            else:
-                all_train_data = all_train_raw
-                self.update_status(
-                    f"⚠️ 篩選後樣本不足 ({len(filtered_train_data)} 筆)，"
-                    f"使用全部 {len(all_train_data)} 筆訓練"
-                )
-            
-            # 訓練 統一 Autoencoder
+            # 訓練 Contrastive Autoencoder（上漲型態 & 下跌型態各一個）
             self.model_engine.train_autoencoder(all_train_data, epochs=50)
             
             # 2-3. 監控損失
-            if self.model_engine.history is not None:
-                hist = self.model_engine.history.history
-                _msg = f"✅ 統一 AE 最終損失: {hist['loss'][-1]:.6f}"
-                if 'val_loss' in hist:
-                    _msg += f", 驗證損失: {hist['val_loss'][-1]:.6f}"
+            if self.model_engine.history_up is not None:
+                hist_up = self.model_engine.history_up.history
+                _msg = f"✅ 上漲型態 AE 最終損失（含對比項）: {hist_up['loss'][-1]:.6f}"
+                if 'val_loss' in hist_up:
+                    _msg += f", 驗證損失: {hist_up['val_loss'][-1]:.6f}"
+                self.update_status(_msg)
+            
+            if self.model_engine.history_down is not None:
+                hist_down = self.model_engine.history_down.history
+                _msg = f"✅ 下跌型態 AE 最終損失（含對比項）: {hist_down['loss'][-1]:.6f}"
+                if 'val_loss' in hist_down:
+                    _msg += f", 驗證損失: {hist_down['val_loss'][-1]:.6f}"
                 self.update_status(_msg)
             
             self.update_status("✅ [Step 2 完成] Contrastive AE 預訓練完成，Latent Space 鑑別度提升")
@@ -1735,25 +2077,35 @@ class App:
             widget.destroy()
         plt.close('all')
 
-        w, h = self._get_fig_size(self.loss_frame, fallback_w=10, fallback_h=5)
-        fig, ax = plt.subplots(1, 1, figsize=(w, h), facecolor='#2d2d2d')
-        fig.subplots_adjust(left=0.1, right=0.95, top=0.90, bottom=0.15)
+        w, h = self._get_fig_size(self.loss_frame, fallback_w=12, fallback_h=5)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(w, h), facecolor='#2d2d2d')
+        fig.subplots_adjust(left=0.07, right=0.97, top=0.90, bottom=0.12, wspace=0.3)
 
-        if self.model_engine.history is not None:
-            ax.set_facecolor('#1e1e1e')
-            history = self.model_engine.history.history
-            ax.plot(history['loss'], color='#4caf50', linewidth=2, label='Training Loss')
-            if 'val_loss' in history:
-                ax.plot(history['val_loss'], color='#81c784', linewidth=2, label='Validation Loss')
-            ax.set_title('統一 Autoencoder Loss', color='white', fontsize=12, fontweight='bold')
-            ax.set_xlabel('Epoch', color='white', fontsize=10)
-            ax.set_ylabel('Loss (MSE)', color='white', fontsize=10)
-            ax.tick_params(colors='white', labelsize=9)
-            ax.legend(facecolor='#2d2d2d', edgecolor='white', labelcolor='white', fontsize=10)
-            ax.grid(True, alpha=0.3, color='gray')
-        else:
-            ax.text(0.5, 0.5, '尚未訓練模型', transform=ax.transAxes, 
-                   ha='center', va='center', color='white', fontsize=14)
+        if self.model_engine.history_up is not None:
+            ax1.set_facecolor('#1e1e1e')
+            history_up = self.model_engine.history_up.history
+            ax1.plot(history_up['loss'], color='#4caf50', linewidth=2, label='Training Loss')
+            if 'val_loss' in history_up:
+                ax1.plot(history_up['val_loss'], color='#81c784', linewidth=2, label='Validation Loss')
+            ax1.set_title('上漲型態 Autoencoder Loss', color='white', fontsize=11, fontweight='bold')
+            ax1.set_xlabel('Epoch', color='white', fontsize=9)
+            ax1.set_ylabel('Loss (MSE)', color='white', fontsize=9)
+            ax1.tick_params(colors='white', labelsize=8)
+            ax1.legend(facecolor='#2d2d2d', edgecolor='white', labelcolor='white', fontsize=9)
+            ax1.grid(True, alpha=0.3, color='gray')
+
+        if self.model_engine.history_down is not None:
+            ax2.set_facecolor('#1e1e1e')
+            history_down = self.model_engine.history_down.history
+            ax2.plot(history_down['loss'], color='#f44336', linewidth=2, label='Training Loss')
+            if 'val_loss' in history_down:
+                ax2.plot(history_down['val_loss'], color='#e57373', linewidth=2, label='Validation Loss')
+            ax2.set_title('下跌型態 Autoencoder Loss', color='white', fontsize=11, fontweight='bold')
+            ax2.set_xlabel('Epoch', color='white', fontsize=9)
+            ax2.set_ylabel('Loss (MSE)', color='white', fontsize=9)
+            ax2.tick_params(colors='white', labelsize=8)
+            ax2.legend(facecolor='#2d2d2d', edgecolor='white', labelcolor='white', fontsize=9)
+            ax2.grid(True, alpha=0.3, color='gray')
 
         canvas = FigureCanvasTkAgg(fig, master=self.loss_frame)
         canvas.draw()
