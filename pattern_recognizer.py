@@ -41,6 +41,7 @@ class CandlePattern:
         prev = self.df.iloc[idx - 1]
         curr = self.df.iloc[idx]
 
+        if curr["Range"] == 0: return False
         body_ratio = curr["Body"] / curr["Range"]
         shadow_ratio = curr["LowShadow"] / curr["Range"]
 
@@ -60,6 +61,7 @@ class CandlePattern:
         prev = self.df.iloc[idx - 1]
         curr = self.df.iloc[idx]
 
+        if curr["Range"] == 0: return False
         body_ratio = curr["Body"] / curr["Range"]
         shadow_ratio = curr["LowShadow"] / curr["Range"]
 
@@ -80,6 +82,7 @@ class CandlePattern:
 
         if curr["Range"] == 0:
             return False
+        if curr["Range"] == 0: return False
         body_ratio = curr["Body"] / curr["Range"]
         shadow_ratio = curr["HighShadow"] / curr["Range"]
 
@@ -228,6 +231,7 @@ class CandlePattern:
             return False
 
         curr = self.df.iloc[idx]
+        if curr["Range"] == 0: return False
         body_ratio = curr["Body"] / curr["Range"]
 
         return body_ratio < 0.1 and curr["Range"] > 0
