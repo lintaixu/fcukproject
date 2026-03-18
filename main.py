@@ -46,7 +46,7 @@ def main():
     all_trades = {}
 
     # 遍歷股票
-    symbols_to_test = STOCK_SYMBOLS[:3]  # 測試前3個股票以加快速度
+    symbols_to_test = STOCK_SYMBOLS  # 分析全部50大公司
 
     for symbol in symbols_to_test:
         logger.info(f"\n{'=' * 60}")
@@ -175,20 +175,20 @@ def main():
 
     # 打印文本報告
     if combined_metrics:
-        report_text = analyzer.generate_summary_report(combined_metrics, "台灣股市樣本")
+        report_text = analyzer.generate_summary_report(combined_metrics, "台灣股市樣本（台灣前50大公司）")
         logger.info(report_text)
 
         # 匯出結果
         analyzer.export_csv(combined_analysis, "patterns_stats.csv")
         analyzer.export_json(combined_analysis, "backtest_results.json")
         generate_html_report(
-            combined_analysis, "台灣股市樣本 (2022-2025)", "analysis_report.html"
+            combined_analysis, "台灣股市樣本（台灣前50大公司）", "analysis_report.html"
         )
 
         logger.info("\n✓ 已生成以下文件:")
         logger.info("  - patterns_stats.csv (型態統計)")
         logger.info("  - backtest_results.json (詳細結果)")
-        logger.info("  - analysis_report.html (互動報告)")
+        logger.info("  - analysis_report.html (K線型態回測分析報告)")
     else:
         logger.warning("沒有足夠的交易訊號進行分析")
 
