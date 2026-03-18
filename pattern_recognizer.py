@@ -264,6 +264,156 @@ class CandlePattern:
             and k1["Close"] < k2["Close"] < k3["Close"]
         )
 
+    def _is_triple_top(self, idx: int, lookback: int = 20) -> bool:
+        """三重頂: 過去lookback天內有三個相近的高點"""
+        if idx < lookback:
+            return False
+
+        data = self.df["High"].iloc[idx - lookback : idx + 1].values
+        peaks = []
+        for i in range(1, len(data) - 1):
+            if data[i] > data[i - 1] and data[i] > data[i + 1]:
+                peaks.append(data[i])
+
+        if len(peaks) >= 3:
+            last_3_peaks = peaks[-3:]
+            avg_peak = sum(last_3_peaks) / 3
+            if all(abs(p - avg_peak) / avg_peak < 0.015 for p in last_3_peaks):
+                if self.df["Close"].iloc[idx] < self.df["Close"].iloc[idx - 1]:
+                    return True
+        return False
+
+    def _is_triple_bottom(self, idx: int, lookback: int = 20) -> bool:
+        """三重底: 過去lookback天內有三個相近的低點"""
+        if idx < lookback:
+            return False
+
+        data = self.df["Low"].iloc[idx - lookback : idx + 1].values
+        valleys = []
+        for i in range(1, len(data) - 1):
+            if data[i] < data[i - 1] and data[i] < data[i + 1]:
+                valleys.append(data[i])
+
+        if len(valleys) >= 3:
+            last_3_valleys = valleys[-3:]
+            avg_valley = sum(last_3_valleys) / 3
+            if all(abs(v - avg_valley) / avg_valley < 0.015 for v in last_3_valleys):
+                if self.df["Close"].iloc[idx] > self.df["Close"].iloc[idx - 1]:
+                    return True
+        return False
+
+    def _is_bullish_flag(
+        self, idx: int, flagpole_len: int = 5, flag_len: int = 5
+    ) -> bool:
+        """牛旗形: 急漲後的小幅回調"""
+        lookback = flagpole_len + flag_len
+        if idx < lookback:
+            return False
+
+        pole_start = idx - flag_len - flagpole_len
+        pole_end = idx - flag_len
+
+        pole_start_price = self.df["Close"].iloc[pole_start]
+        pole_end_price = self.df["Close"].iloc[pole_end]
+
+        if pole_end_price <= pole_start_price * 1.03:
+            return False
+
+        flag_data = self.df["Close"].iloc[pole_end : idx + 1]
+
+        if flag_data.iloc[-1] > pole_end_price:
+            return False
+
+        retracement = (pole_end_price - flag_data.iloc[-1]) / (
+            pole_end_price - pole_start_price
+        )
+        if retracement > 0.5 or retracement < 0.1:
+            return False
+
+        if self.df["IsGreen"].iloc[idx]:
+            return True
+        return False
+
+    def _is_bearish_flag(
+        self, idx: int, flagpole_len: int = 5, flag_len: int = 5
+    ) -> bool:
+        """熊旗形: 急跌後的小幅反彈"""
+        lookback = flagpole_len + flag_len
+        if idx < lookback:
+            return False
+
+        pole_start = idx - flag_len - flagpole_len
+        pole_end = idx - flag_len
+
+        pole_start_price = self.df["Close"].iloc[pole_start]
+        pole_end_price = self.df["Close"].iloc[pole_end]
+
+        if pole_end_price >= pole_start_price * 0.97:
+            return False
+
+        flag_data = self.df["Close"].iloc[pole_end : idx + 1]
+
+        if flag_data.iloc[-1] < pole_end_price:
+            return False
+
+        retracement = (flag_data.iloc[-1] - pole_end_price) / (
+            pole_start_price - pole_end_price
+        )
+        if retracement > 0.5 or retracement < 0.1:
+            return False
+
+        if not self.df["IsGreen"].iloc[idx]:
+            return True
+        return False
+
+    def _is_bullish_wedge(self, idx: int, wedge_len: int = 10) -> bool:
+        """下降楔形 (看漲): 高點和低點都在降低"""
+        if idx < wedge_len + 1:
+            return False
+
+        data_high = self.df["High"].iloc[idx - wedge_len : idx + 1].values
+        data_low = self.df["Low"].iloc[idx - wedge_len : idx + 1].values
+
+        if data_high[-1] > data_high[0] or data_low[-1] > data_low[0]:
+            return False
+
+        range_start = data_high[0] - data_low[0]
+        range_end = data_high[-1] - data_low[-1]
+
+        if range_start == 0 or range_end >= range_start * 0.8:
+            return False
+
+        if (
+            self.df["IsGreen"].iloc[idx]
+            and self.df["Close"].iloc[idx] > self.df["Open"].iloc[idx - 1]
+        ):
+            return True
+        return False
+
+    def _is_bearish_wedge(self, idx: int, wedge_len: int = 10) -> bool:
+        """上升楔形 (看跌): 高點和低點都在升高"""
+        if idx < wedge_len + 1:
+            return False
+
+        data_high = self.df["High"].iloc[idx - wedge_len : idx + 1].values
+        data_low = self.df["Low"].iloc[idx - wedge_len : idx + 1].values
+
+        if data_high[-1] < data_high[0] or data_low[-1] < data_low[0]:
+            return False
+
+        range_start = data_high[0] - data_low[0]
+        range_end = data_high[-1] - data_low[-1]
+
+        if range_start == 0 or range_end >= range_start * 0.8:
+            return False
+
+        if (
+            not self.df["IsGreen"].iloc[idx]
+            and self.df["Close"].iloc[idx] < self.df["Open"].iloc[idx - 1]
+        ):
+            return True
+        return False
+
     def detect_all_patterns(self) -> Dict[str, List[int]]:
         """
         檢測所有型態
@@ -286,6 +436,12 @@ class CandlePattern:
             "doji": [],
             "three_black_crows": [],
             "three_white_soldiers": [],
+            "triple_top": [],
+            "triple_bottom": [],
+            "bullish_flag": [],
+            "bearish_flag": [],
+            "bullish_wedge": [],
+            "bearish_wedge": [],
         }
 
         pattern_methods = {
@@ -303,6 +459,12 @@ class CandlePattern:
             "doji": self._is_doji,
             "three_black_crows": self._is_three_black_crows,
             "three_white_soldiers": self._is_three_white_soldiers,
+            "triple_top": self._is_triple_top,
+            "triple_bottom": self._is_triple_bottom,
+            "bullish_flag": self._is_bullish_flag,
+            "bearish_flag": self._is_bearish_flag,
+            "bullish_wedge": self._is_bullish_wedge,
+            "bearish_wedge": self._is_bearish_wedge,
         }
 
         for idx in range(len(self.df)):
