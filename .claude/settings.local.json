@@ -9,7 +9,8 @@
       "Bash(start pythonw:*)",
       "Bash(start cmd:*)",
       "Bash(cmd /c \"cd /d C:\\\\Users\\\\alex\\\\Desktop\\\\專題進度\\\\0401 && python run_full_grid_search.py\")",
-      "Bash(python run_full_grid_search.py)"
+      "Bash(python run_full_grid_search.py)",
+      "Bash(python run_nu_search.py)"
     ]
   }
 }
