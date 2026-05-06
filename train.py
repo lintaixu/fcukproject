@@ -16,10 +16,10 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
     total_loss = 0.0
     n_correct = 0
     n_total = 0
-    for X, y in loader:
-        X, y = X.to(device), y.to(device)
+    for X, A, y in loader:
+        X, A, y = X.to(device), A.to(device), y.to(device)
         optimizer.zero_grad()
-        logits = model(X)
+        logits = model(X, A)
         loss = criterion(logits, y)
         loss.backward()
         optimizer.step()
@@ -34,9 +34,9 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
 def evaluate(model, loader, device):
     model.eval()
     all_pred, all_true = [], []
-    for X, y in loader:
-        X, y = X.to(device), y.to(device)
-        logits = model(X)
+    for X, A, y in loader:
+        X, A, y = X.to(device), A.to(device), y.to(device)
+        logits = model(X, A)
         all_pred.append(logits.argmax(1).cpu().numpy())
         all_true.append(y.cpu().numpy())
     pred = np.concatenate(all_pred)

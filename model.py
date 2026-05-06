@@ -1,37 +1,61 @@
 """
-Chart GCN model.
+Chart GCN model (對齊論文).
 
 Pipeline:
-  Input:  X of shape (B, N, g, F)   -- B 是 batch size
-  Conv1:  kernel = (g, F)            -> (B, k1, N, 1)  抓單一子圖內的局部圖表特徵
-  Squeeze + Conv2: kernel = (k1, 5)  -> (B, k2, N-4)   跨子圖組成更高階型態
-  Conv3:  kernel = (k2, 1)           -> (B, k3, N-4)
-  Flatten + FC1 + FC2                -> (B, F2)
-  Self-Attention (within batch)      -> (B, kv)
-  Output: (B, 2)  二分類漲跌
-
-注意: 論文的 self-attention 設計是跨 S 個樣本 (不同股票同一天). 這裡實作為
-       對 batch 內樣本做 self-attention, 等價於在訓練時把同日不同股票的樣本
-       打包成同一 batch.
+  Input:  X (B, N, g, F),  A (B, N, g, g)
+  GCN:    兩層圖卷積, 利用鄰接矩陣 A 做 spatial graph convolution
+  Conv1:  kernel = (g, F)  → (B, k1, N, 1)   每個子圖壓縮成 k1 維特徵
+  Conv2:  kernel = (5, 1)  → (B, k2, N-4, 1) 跨子圖組合高階圖表型態
+  Conv3:  kernel = (1, 1)  → (B, k3, N-4, 1) channel mixing
+  FC1 + FC2                → (B, F2)
+  Self-Attention + Residual → (B, F2)
+  Output: (B, 2)
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
+class GraphConvLayer(nn.Module):
+    """
+    Spatial graph convolution: H = σ(D^{-1} A_hat X W + b)
+    使用 row-normalized adjacency, 對應 DGCNN [22] 的做法。
+    """
+
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+        nn.init.kaiming_normal_(self.linear.weight, nonlinearity='relu')
+
+    def forward(self, X, A):
+        """
+        Args:
+            X: (B, N, g, F_in)
+            A: (B, N, g, g)
+        Returns:
+            H: (B, N, g, F_out)
+        """
+        I = torch.eye(A.size(-1), device=A.device)
+        A_hat = A + I
+        D = A_hat.sum(dim=-1, keepdim=True).clamp(min=1)
+        A_norm = A_hat / D
+        H = A_norm @ X
+        H = self.linear(H)
+        return H
+
+
 class ChartGCN(nn.Module):
     def __init__(
         self,
-        N: int = 15,        # 子圖數
-        g: int = 5,         # 子圖節點數
-        F_dim: int = 9,     # 技術指標數
+        N: int = 15,
+        g: int = 5,
+        F_dim: int = 9,
         k1: int = 32,
         k2: int = 32,
         k3: int = 16,
         F1: int = 84,
         F2: int = 32,
         ka: int = 16,
-        kv: int = 16,
         n_classes: int = 2,
     ):
         super().__init__()
@@ -39,92 +63,94 @@ class ChartGCN(nn.Module):
         self.g = g
         self.F_dim = F_dim
         self.k1 = k1
-        self.k2 = k2
-        self.k3 = k3
 
-        # Conv1: 把每個子圖 (g x F) 卷積成 1 個 channel
-        # input  : (B, 1, N, g*F)  ← 我們會把 (g, F) flatten 成 g*F 一維
-        # 但更標準做法是用 2D conv:
-        # input  : (B, 1, N*g, F) — 不適合
-        # 我們改用: (B, 1, N, g*F),  kernel=(1, g*F),  stride=(1, g*F)
-        # 等價於對每個子圖內的 g*F 個元素做一次卷積 → 輸出 (B, k1, N, 1)
-        self.conv1 = nn.Conv2d(
-            in_channels=1, out_channels=k1,
-            kernel_size=(1, g * F_dim),
-            stride=(1, g * F_dim),
-        )
+        # GCN layers
+        self.gcn1 = GraphConvLayer(F_dim, F_dim)
+        self.gcn2 = GraphConvLayer(F_dim, F_dim)
 
-        # Conv2: 跨子圖卷積  (B, k1, N, 1) → (B, k2, N-4, 1)
-        self.conv2 = nn.Conv2d(
-            in_channels=k1, out_channels=k2,
-            kernel_size=(5, 1),
-        )
+        # Conv1: kernel (g, F)
+        self.conv1 = nn.Conv2d(1, k1, kernel_size=(g, F_dim))
 
-        # Conv3: (B, k2, N-4, 1) → (B, k3, N-4, 1)
-        self.conv3 = nn.Conv2d(
-            in_channels=k2, out_channels=k3,
-            kernel_size=(1, 1),
-        )
+        # Conv2: kernel (5, 1) 跨子圖卷積
+        self.conv2 = nn.Conv2d(k1, k2, kernel_size=(5, 1))
 
-        # Flatten + FC
+        # Conv3: kernel (1, 1)
+        self.conv3 = nn.Conv2d(k2, k3, kernel_size=(1, 1))
+
+        # FC
         flat_dim = k3 * (N - 4)
         self.fc1 = nn.Linear(flat_dim, F1)
         self.fc2 = nn.Linear(F1, F2)
 
-        # Self-Attention
+        # Self-Attention (Eq.7-9), kv = F2 以支援 residual connection
         self.Wq = nn.Linear(F2, ka)
         self.Wk = nn.Linear(F2, ka)
-        self.Wv = nn.Linear(F2, kv)
+        self.Wv = nn.Linear(F2, F2)
         self.scale = ka ** 0.5
 
-        # Final classifier
-        self.classifier = nn.Linear(kv, n_classes)
+        # Classifier
+        self.classifier = nn.Linear(F2, n_classes)
 
-        self.dropout = nn.Dropout(0.3)
+        self._init_weights()
 
-    def forward(self, X):
+    def _init_weights(self):
+        for m in [self.conv1, self.conv2, self.conv3]:
+            nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+            nn.init.zeros_(m.bias)
+        for m in [self.fc1, self.fc2, self.classifier]:
+            nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+            nn.init.zeros_(m.bias)
+        for m in [self.Wq, self.Wk, self.Wv]:
+            nn.init.xavier_normal_(m.weight)
+            nn.init.zeros_(m.bias)
+
+    def forward(self, X, A):
         """
         Args:
-            X: tensor of shape (B, N, g, F)
+            X: (B, N, g, F)
+            A: (B, N, g, g)
         Returns:
             logits: (B, n_classes)
         """
-        B, N, g, F_dim = X.shape
-        assert N == self.N and g == self.g and F_dim == self.F_dim
+        B = X.shape[0]
 
-        # reshape 成 (B, 1, N, g*F)
-        x = X.reshape(B, 1, N, g * F_dim)
+        # --- GCN ---
+        H = F.relu(self.gcn1(X, A))
+        H = F.relu(self.gcn2(H, A))
 
-        # Conv1 → (B, k1, N, 1)
-        x = F.relu(self.conv1(x))
+        # --- Conv1: 逐子圖卷積 ---
+        H = H.reshape(B * self.N, 1, self.g, self.F_dim)
+        H = F.relu(self.conv1(H))
 
-        # Conv2 → (B, k2, N-4, 1)
-        x = F.relu(self.conv2(x))
+        H = H.reshape(B, self.N, self.k1)
+        H = H.permute(0, 2, 1).unsqueeze(-1)
 
-        # Conv3 → (B, k3, N-4, 1)
-        x = F.relu(self.conv3(x))
+        # --- Conv2 + Conv3 ---
+        H = F.relu(self.conv2(H))
+        H = F.relu(self.conv3(H))
 
-        # Flatten
-        x = x.reshape(B, -1)
-        x = self.dropout(F.relu(self.fc1(x)))
-        l = F.relu(self.fc2(x))      # (B, F2)
+        # --- FC ---
+        H = H.reshape(B, -1)
+        H = F.relu(self.fc1(H))
+        l = F.relu(self.fc2(H))           # (B, F2)
 
-        # Self-Attention (within batch)
-        Q = self.Wq(l)               # (B, ka)
+        # --- Self-Attention (Eq.7-9) + residual ---
+        Q = self.Wq(l)                    # (B, ka)
         K = self.Wk(l)
-        V = self.Wv(l)               # (B, kv)
+        V = self.Wv(l)                    # (B, F2)
         scores = (Q @ K.T) / self.scale
         attn = F.softmax(scores, dim=-1)
-        Va = attn @ V                # (B, kv)
+        Va = attn @ V                     # (B, F2)
 
-        logits = self.classifier(Va)
+        logits = self.classifier(l + Va)
         return logits
 
 
 if __name__ == "__main__":
     model = ChartGCN(N=15, g=5, F_dim=9)
     x = torch.randn(8, 15, 5, 9)
-    out = model(x)
-    print(f"Output shape: {out.shape}")  # (8, 2)
+    a = torch.randint(0, 2, (8, 15, 5, 5)).float()
+    out = model(x, a)
+    print(f"Output shape: {out.shape}")
     n_params = sum(p.numel() for p in model.parameters())
     print(f"模型參數量: {n_params:,}")

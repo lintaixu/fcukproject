@@ -34,6 +34,7 @@ class ChartGCNDataset(Dataset):
         self.g = g
 
         self.X_list = []        # list of (N, g, F) arrays
+        self.A_list = []        # list of (N, g, g) adjacency matrices
         self.y_list = []        # list of int labels
         self.meta = []          # (ticker, end_date) for traceability
 
@@ -63,6 +64,7 @@ class ChartGCNDataset(Dataset):
                     continue
 
                 self.X_list.append(X)
+                self.A_list.append(_A)
                 self.y_list.append(label)
                 self.meta.append((ticker, df.index[end]))
                 samples += 1
@@ -72,6 +74,7 @@ class ChartGCNDataset(Dataset):
 
         # 轉成 numpy / tensor
         self.X = np.stack(self.X_list, axis=0)             # (M, N, g, F)
+        self.A = np.stack(self.A_list, axis=0)             # (M, N, g, g)
         self.y = np.array(self.y_list, dtype=np.int64)     # (M,)
 
         if verbose:
@@ -86,6 +89,7 @@ class ChartGCNDataset(Dataset):
     def __getitem__(self, idx):
         return (
             torch.from_numpy(self.X[idx]).float(),
+            torch.from_numpy(self.A[idx]).float(),
             torch.tensor(self.y[idx], dtype=torch.long),
         )
 

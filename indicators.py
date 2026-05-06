@@ -53,8 +53,8 @@ def compute_indicators(df: pd.DataFrame, n: int = 14) -> np.ndarray:
     # 7. Stochastic K%
     k = (close - ll) / (hh - ll + 1e-9) * 100
 
-    # 8. Stochastic D% (3-day moving average of K%)
-    d = k.rolling(3).mean()
+    # 8. Stochastic D% (10-day moving average of K%, 對應論文 Table 1)
+    d = k.rolling(10).mean()
 
     # 9. RSI
     delta = close.diff()

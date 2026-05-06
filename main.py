@@ -13,6 +13,7 @@ from torch.utils.data import random_split
 from data_loader import fetch_tw_stocks, TW50_TICKERS
 from dataset import ChartGCNDataset, split_by_date
 from train import fit
+from backtest import run_backtest, plot_backtest
 
 
 def main():
@@ -32,7 +33,7 @@ def main():
     p.add_argument("--stride", type=int, default=1,
                    help="rolling window 的步長, 越大訓練樣本越少但越快")
     p.add_argument("--epochs", type=int, default=30)
-    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
@@ -87,10 +88,15 @@ def main():
         lr=args.lr,
     )
 
-    print("\n=== 完成 ===")
+    print("\n=== 分類結果 ===")
     print(f"Test accuracy: {metrics['acc']:.4f}")
     print(f"Test F1 (漲): {metrics['f1_1']:.4f}")
     print(f"Test F1 (跌): {metrics['f1_0']:.4f}")
+
+    # 5. 交易模擬 (論文 Section 6.3)
+    print(f"\n[STEP 6] 交易模擬")
+    bt_results = run_backtest(model, test_ds, test_data)
+    plot_backtest(bt_results, save_path='backtest_result.png')
 
 
 if __name__ == "__main__":
