@@ -2,55 +2,45 @@
 
 ## 一、方法論層面差異
 
-### 1. Self-Attention Residual Connection（嚴重度：高）
+### 1. ✅ Self-Attention Residual Connection（嚴重度：高）— 已修正
 
-| | 論文 | 目前程式碼 |
-|---|---|---|
-| 公式 | `logits = classifier(Va)` | `logits = classifier(l + Va)` |
-| 位置 | — | `model.py:145` |
+| | 論文 | ~~舊程式碼~~ | 目前程式碼 |
+|---|---|---|---|
+| 公式 | `logits = classifier(Va)` | `logits = classifier(l + Va)` | `logits = classifier(Va)` ✅ |
+| 位置 | — | `model.py:145` | `model.py:147` |
 
-**說明：**
-論文 Self-Attention 的輸出 Va 直接送入 classifier 做分類。程式碼額外加了 residual connection（`l + Va`），因為不加的話 attention 會在隨機 batch 中把所有樣本特徵平均化，導致模型完全無法訓練（所有樣本輸出相同 logits）。
-
-**影響：** 改變了 attention 的語意。論文中 attention 完全決定最終特徵；程式碼中 attention 只是「輔助」，主要依賴 FC 層的原始輸出 `l`。
-
-**修改方向：** 若能實作同日 batch（見第 3 點），可嘗試移除 residual，回歸論文原始設計。
+**已完成修改：**
+- 移除 residual connection，`classifier(Va)` 直接對 attention 輸出分類（對齊論文 Eq.9）
+- 搭配同日 batch（第 3 點），attention 在同日 50 檔股票間計算，梯度正常流動
 
 ---
 
-### 2. Self-Attention kv 維度綁定（嚴重度：中）
+### 2. ✅ Self-Attention kv 維度綁定（嚴重度：中）— 已修正
 
-| | 論文 | 目前程式碼 |
-|---|---|---|
-| kv | 獨立超參數，可與 F2 不同 | 強制 `kv = F2 = 32` |
-| 位置 | — | `model.py:88` |
+| | 論文 | ~~舊程式碼~~ | 目前程式碼 |
+|---|---|---|---|
+| kv | 獨立超參數，可與 F2 不同 | 強制 `kv = F2 = 32` | `kv = 16`（獨立參數）✅ |
+| 位置 | — | `model.py:88` | `model.py:59, 87-90` |
 
-**說明：**
-論文中 kv 是自由超參數。程式碼因為 residual connection 需要 `l`（F2 維）和 `Va`（kv 維）相加，所以強制 kv = F2。
-
-**修改方向：** 若移除 residual，可恢復 kv 為獨立參數；或改用投影層 `nn.Linear(kv, F2)` 對齊維度。
+**已完成修改：**
+- `kv` 恢復為獨立超參數（預設 16），`Wv: Linear(F2, kv)`，`classifier: Linear(kv, 2)`
+- 移除 residual 後不再需要 kv = F2 的限制
 
 ---
 
-### 3. Self-Attention 作用域 — 未按日期分組 batch（嚴重度：高）
+### 3. ✅ Self-Attention 作用域 — 未按日期分組 batch（嚴重度：高）— 已修正
 
-| | 論文 | 目前程式碼 |
-|---|---|---|
-| 對象 | 同一天的 S 檔股票互相 attend | batch 內隨機樣本（不保證同日） |
-| 位置 | — | `model.py:137-143`、`train.py:71` |
+| | 論文 | ~~舊程式碼~~ | 目前程式碼 |
+|---|---|---|---|
+| 對象 | 同一天的 S 檔股票互相 attend | batch 內隨機樣本 | 同日 50 檔股票 ✅ |
+| 位置 | — | `train.py:71` | `train.py:35-73` |
 
-**說明：**
-論文的 Self-Attention 設計目的是捕捉「同一天不同股票之間的關聯」。例如某天金融股全部出現下跌圖表，attention 可以將這個訊號傳遞給其他股票。
-
-目前程式碼的 DataLoader 使用 `shuffle=True` 隨機打包，一個 batch 內可能包含不同年份、不同股票的樣本，attention 計算的是無意義的跨時間關聯。
-
-**修改方向：**
-需要實作 `DateGroupedBatchSampler`，確保每個 batch 只包含同一天的所有股票。具體修改：
-- `dataset.py`：記錄每個樣本的日期，建立日期 → index 的映射
-- `train.py`：自訂 BatchSampler，按日期分組
-- 每個 batch size = 該日有效股票數（約 50），無法自由調整 batch_size
-
-**預估影響：** 論文消融實驗顯示，Self-Attention 貢獻約 5% 準確率（SZ-50: 64.59% → 69.26%）。
+**已完成修改：**
+- `dataset.py`：新增 `date_to_indices` 映射（日期 → sample index list）
+- `train.py`：實作 `DateGroupedBatchSampler`，每個 batch = 同一天的所有股票
+- 支援 `Subset`（train/val split 後自動重映射 index）
+- train/val/test 三個 DataLoader 均使用同日分組，確保 attention 語意一致
+- batch size = 該日有效股票數（~50），每日打亂順序
 
 ---
 
@@ -201,13 +191,13 @@
 
 ## 五、優先修改順序建議
 
-| 優先度 | 項目 | 預估影響 |
-|--------|------|---------|
-| 1 | 同日 batch Self-Attention（第 3 點） | +5% acc |
-| 2 | 移除 residual，恢復論文原始設計（第 1、2 點） | 需搭配第 3 點 |
-| 3 | Grid search 超參數（第 10 點） | +2~5% acc |
-| 4 | stride=1 + lazy loading（第 9 點） | 更多訓練樣本 |
-| 5 | Conv3 kernel 實驗（第 4 點） | 未知 |
-| 6 | 消融實驗（第 13 點） | 驗證各組件貢獻 |
-| 7 | Baseline 對比（第 12 點） | 驗證方法優越性 |
-| 8 | 相似度魯棒性（第 11 點） | 驗證相似度框架 |
+| 優先度 | 項目 | 預估影響 | 狀態 |
+|--------|------|---------|------|
+| 1 | 同日 batch Self-Attention（第 3 點） | +5% acc | ✅ 已完成 |
+| 2 | 移除 residual，恢復論文原始設計（第 1、2 點） | 需搭配第 3 點 | ✅ 已完成 |
+| 3 | Grid search 超參數（第 10 點） | +2~5% acc | 待實作 |
+| 4 | stride=1 + lazy loading（第 9 點） | 更多訓練樣本 | 待實作 |
+| 5 | Conv3 kernel 實驗（第 4 點） | 未知 | 待實作 |
+| 6 | 消融實驗（第 13 點） | 驗證各組件貢獻 | 待實作 |
+| 7 | Baseline 對比（第 12 點） | 驗證方法優越性 | 待實作 |
+| 8 | 相似度魯棒性（第 11 點） | 驗證相似度框架 | 待實作 |

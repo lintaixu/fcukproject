@@ -77,11 +77,23 @@ class ChartGCNDataset(Dataset):
         self.A = np.stack(self.A_list, axis=0)             # (M, N, g, g)
         self.y = np.array(self.y_list, dtype=np.int64)     # (M,)
 
+        # 建立日期 → sample index 映射 (供 DateGroupedBatchSampler 使用)
+        self.date_to_indices = {}
+        for i, (ticker, date) in enumerate(self.meta):
+            # 統一用日期字串作為 key (去除時間部分)
+            date_key = str(date)[:10]
+            if date_key not in self.date_to_indices:
+                self.date_to_indices[date_key] = []
+            self.date_to_indices[date_key].append(i)
+
         if verbose:
             n_pos = (self.y == 1).sum()
             n_neg = (self.y == 0).sum()
+            n_dates = len(self.date_to_indices)
             print(f"\nTotal samples: {len(self.y)} "
                   f"(漲={n_pos}, 跌={n_neg}, 漲比例={n_pos/len(self.y):.2%})")
+            print(f"Unique dates: {n_dates}, "
+                  f"avg stocks/date: {len(self.y)/n_dates:.1f}")
 
     def __len__(self):
         return len(self.y)

@@ -8,7 +8,7 @@ Pipeline:
   Conv2:  kernel = (5, 1)  → (B, k2, N-4, 1) 跨子圖組合高階圖表型態
   Conv3:  kernel = (1, 1)  → (B, k3, N-4, 1) channel mixing
   FC1 + FC2                → (B, F2)
-  Self-Attention + Residual → (B, F2)
+  Self-Attention           → (B, kv)    ← 論文原始設計, 無 residual
   Output: (B, 2)
 """
 import torch
@@ -56,6 +56,7 @@ class ChartGCN(nn.Module):
         F1: int = 84,
         F2: int = 32,
         ka: int = 16,
+        kv: int = 16,
         n_classes: int = 2,
     ):
         super().__init__()
@@ -82,14 +83,15 @@ class ChartGCN(nn.Module):
         self.fc1 = nn.Linear(flat_dim, F1)
         self.fc2 = nn.Linear(F1, F2)
 
-        # Self-Attention (Eq.7-9), kv = F2 以支援 residual connection
+        # Self-Attention (Eq.7-9) — 論文原始設計, kv 為獨立超參數
+        self.kv = kv
         self.Wq = nn.Linear(F2, ka)
         self.Wk = nn.Linear(F2, ka)
-        self.Wv = nn.Linear(F2, F2)
+        self.Wv = nn.Linear(F2, kv)
         self.scale = ka ** 0.5
 
-        # Classifier
-        self.classifier = nn.Linear(F2, n_classes)
+        # Classifier — 輸入為 kv 維 (attention 輸出), 非 F2
+        self.classifier = nn.Linear(kv, n_classes)
 
         self._init_weights()
 
@@ -134,15 +136,15 @@ class ChartGCN(nn.Module):
         H = F.relu(self.fc1(H))
         l = F.relu(self.fc2(H))           # (B, F2)
 
-        # --- Self-Attention (Eq.7-9) + residual ---
+        # --- Self-Attention (Eq.7-9) — 論文原始設計, 無 residual ---
         Q = self.Wq(l)                    # (B, ka)
         K = self.Wk(l)
-        V = self.Wv(l)                    # (B, F2)
+        V = self.Wv(l)                    # (B, kv)
         scores = (Q @ K.T) / self.scale
         attn = F.softmax(scores, dim=-1)
-        Va = attn @ V                     # (B, F2)
+        Va = attn @ V                     # (B, kv)
 
-        logits = self.classifier(l + Va)
+        logits = self.classifier(Va)
         return logits
 
 
