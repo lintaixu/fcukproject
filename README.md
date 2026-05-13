@@ -47,13 +47,13 @@ Chart GCN 的核心創新在於**繞過量化問題**：
                        ▼
             ┌──────────────────────┐
             │  PIP 演算法           │ 用 Euclidean 距離迭代選關鍵點
-            │  (m=40 個 key points) │ 同時得到每點的 importance score
+            │  (m=5 個 key points)  │ 同時得到每點的 importance score
             └──────────┬───────────┘
                        │
                        ▼
             ┌──────────────────────┐
             │  Visibility Graph     │ 兩點若無遮擋即連邊 (Eq. 3)
-            │  G(V=40, E=~120)      │ 對時間長度具有 invariance
+            │  G(V=5, E=~8)         │ 對時間長度具有 invariance
             └──────────┬───────────┘
                        │
                        ▼
@@ -92,7 +92,7 @@ Chart GCN 的核心創新在於**繞過量化問題**：
 
 ```
 chart_gcn_tw/
-├── data_loader.py      # 台股資料下載 (yfinance + 合成 fallback)
+├── data_loader.py      # 台股資料下載 (yfinance, auto_adjust, parquet cache)
 ├── pip_algorithm.py    # PIP 關鍵點萃取 + importance score
 ├── vg_graph.py         # Visibility Graph 建圖
 ├── subgraph.py         # 子圖選取、正規化、特徵綁定
@@ -140,16 +140,16 @@ GPU 加速：若有 CUDA，PyTorch 會自動使用。在 CPU 上跑 TW50 全部�
 
 ## 快速開始
 
-### 1. 用真實 yfinance 抓台股 TW50 (預設)
+### 1. 用 yfinance 抓台股 TW50 (預設)
 
 ```bash
 python main.py --train-end 2023-12-31
 ```
 
 這會：
-1. 從 yfinance 下載 15 檔 TW50 主要成分股 (2018–2024)
+1. 從 yfinance 下載 TW50 主要成分股 (2018–2024)，股價自動還原除權息
 2. 切分 2018–2023 為訓練集、2024 為測試集
-3. 用 stride=1 建構 rolling window，套上 PIP+VG+子圖
+3. 用 stride=1 建構 rolling window，套上 PIP（m=5）+VG+子圖
 4. 訓練 30 epochs，回報 test accuracy / precision / F1
 
 ### 2. 指定特定股票
@@ -158,15 +158,7 @@ python main.py --train-end 2023-12-31
 python main.py --tickers 2330.TW 2317.TW 2454.TW --epochs 50
 ```
 
-### 3. 沙箱無外網（用合成資料 debug）
-
-```bash
-python main.py --synthetic --stride 5 --epochs 8
-```
-
-合成資料無真實漲跌訊號，僅用於驗證 pipeline 能跑通。
-
-### 4. 自訂訓練/測試切點
+### 3. 自訂訓練/測試切點
 
 ```bash
 python main.py --start 2015-01-01 --end 2024-12-31 \
@@ -266,7 +258,7 @@ $$\mathcal{L} = -\frac{1}{N} \sum_{n=1}^{N} y_n \log(\hat{y}_n)$$
 | 參數 | 預設 | 論文 Grid Search | 說明 |
 |------|------|-----------------|------|
 | `--window` | 100 | {100, 120, 130, 140} | rolling window 天數 |
-| `--m-pips` | 40 | {30, 40, 60, 80} | PIP 關鍵點數 |
+| `--m-pips` | 5 | {5, 10, 20, 40} | PIP 關鍵點數 |
 | `--N` | 15 | {10, 15, 20, 25} | 核心節點數 (子圖數) |
 | `--g` | 5 | {3, 4, 5, 6} | 每個子圖的節點數 |
 | `--stride` | 1 | — | rolling 步長 (越大越快但樣本越少) |
@@ -328,7 +320,7 @@ Epoch 30 | train_loss=0.5210 train_acc=0.7421 | val_acc=0.6921 val_f1_1=0.7045
 
 1. **資料源**
    - 論文：SZ-50 / CSI-300（中國 A 股）
-   - 本實作：TW50 主要成分股（透過 yfinance，需 `.TW` 後綴）
+   - 本實作：TW50 主要成分股（透過 yfinance，需 `.TW` 後綴）；使用 `auto_adjust=True` 還原除息除權，並以 parquet 快取避免重複下載
 
 2. **MACD 計算**
    - 論文 Table 1：遞迴形式 `MACD_t = MACD_{t-1} + 2/(n+1)·(DIFF_t − MACD_{t-1})`
@@ -349,9 +341,6 @@ Epoch 30 | train_loss=0.5210 train_acc=0.7421 | val_acc=0.6921 val_f1_1=0.7045
 ---
 
 ## 常見問題
-
-**Q: 為什麼模型在合成資料上不會學？**
-A: 合成資料用 GBM 生成，本來就沒有真實的漲跌訊號可學。50% 準確率是預期的。`--synthetic` 只是為了驗證 pipeline，真正評估要用 yfinance。
 
 **Q: yfinance 下載很慢 / 失敗**
 A:

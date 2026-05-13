@@ -21,7 +21,7 @@ class ChartGCNDataset(Dataset):
         self,
         stock_data: dict,           # {ticker: DataFrame}
         window: int = 100,
-        m_pips: int = 40,
+        m_pips: int = 5,
         N: int = 15,
         g: int = 5,
         indicator_n: int = 14,

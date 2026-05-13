@@ -24,10 +24,8 @@ def main():
     p.add_argument("--end", default="2024-12-31")
     p.add_argument("--train-end", default="2023-12-31",
                    help="切分訓練/測試的日期 (含)")
-    p.add_argument("--synthetic", action="store_true",
-                   help="用合成資料代替 yfinance (debug 用)")
     p.add_argument("--window", type=int, default=100)
-    p.add_argument("--m-pips", type=int, default=40)
+    p.add_argument("--m-pips", type=int, default=5)
     p.add_argument("--N", type=int, default=15)
     p.add_argument("--g", type=int, default=5)
     p.add_argument("--stride", type=int, default=1,
@@ -46,7 +44,6 @@ def main():
     data = fetch_tw_stocks(
         tickers=tickers,
         start=args.start, end=args.end,
-        use_synthetic=args.synthetic,
     )
     print(f"  成功取得 {len(data)} 檔資料")
 
