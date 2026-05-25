@@ -11,6 +11,7 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import threading
 import queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
@@ -29,7 +30,6 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-# 設定中文字體（Windows 微軟正黑體）
 plt.rcParams['font.family'] = 'Microsoft JhengHei'
 plt.rcParams['axes.unicode_minus'] = False
 
@@ -37,29 +37,26 @@ torch.manual_seed(42)
 np.random.seed(42)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 固定參數（不開放使用者調整）
+# 固定參數
 # ══════════════════════════════════════════════════════════════════════════════
 HOLD_DAYS    = 5
 RISE_THRESH  = 5.0
 FALL_THRESH  = -5.0
-SIM_THRESH   = 0.95   # 已改用 Euclidean
 DIST_THRESH  = 3.0
 MIN_FREQ     = 5
 MIN_BULL_RET = 2.0
 MIN_BEAR_RET = -2.0
 LATENT_DIM   = 4
 EPOCHS       = 60
-OCSVM_NU     = 0.1    # 越小邊界越緊，訊號越少越精準
-# 交易成本（每筆來回）
-BROKERAGE    = 0.06   # 手續費（買+賣各 0.06%，已折扣）
-TAX          = 0.30   # 證券交易稅（賣出 0.3%）
-TRADE_COST   = BROKERAGE * 2 + TAX   # = 0.42% per round trip
+OCSVM_NU     = 0.1
+BROKERAGE    = 0.06
+TAX          = 0.30
+TRADE_COST   = BROKERAGE * 2 + TAX
 TRAIN_START  = '2016-01-01'
 TRAIN_END    = '2024-12-31'
 TEST_START   = '2025-01-01'
 TEST_END     = '2025-12-31'
 
-# ── 台灣前50大股票 ────────────────────────────────────────────────────────────
 TW50 = {
     '2330.TW': '台積電',   '2317.TW': '鴻海',     '2454.TW': '聯發科',
     '2308.TW': '台達電',   '2303.TW': '聯電',     '2412.TW': '中華電',
@@ -82,7 +79,7 @@ TW50 = {
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 特徵函式（三種天數定義）
+# 特徵函式
 # ══════════════════════════════════════════════════════════════════════════════
 def detect_exdiv_mask(df: pd.DataFrame, tol: float = 0.005) -> pd.Series:
     if 'Adj Close' not in df.columns or 'Close' not in df.columns:
@@ -92,7 +89,6 @@ def detect_exdiv_mask(df: pd.DataFrame, tol: float = 0.005) -> pd.Series:
 
 
 def features_1day(df: pd.DataFrame) -> pd.DataFrame:
-    """1日K線特徵（7個）"""
     O, H, L, C, V = df['Open'], df['High'], df['Low'], df['Close'], df['Volume']
     Cp = C.shift(1)
     upper     = (H - np.maximum(O, C)) / C * 100
@@ -111,7 +107,6 @@ def features_1day(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def features_2day(df: pd.DataFrame) -> pd.DataFrame:
-    """2日K線特徵（10個）"""
     O, H, L, C, V = df['Open'], df['High'], df['Low'], df['Close'], df['Volume']
     O1, H1, L1, C1 = O.shift(1), H.shift(1), L.shift(1), C.shift(1)
     upper     = (H  - np.maximum(O,  C )) / C  * 100
@@ -134,7 +129,6 @@ def features_2day(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def features_3day(df: pd.DataFrame) -> pd.DataFrame:
-    """3日K線特徵（12個）"""
     O, H, L, C, V = df['Open'], df['High'], df['Low'], df['Close'], df['Volume']
     O1, H1, L1, C1 = O.shift(1), H.shift(1), L.shift(1), C.shift(1)
     O2, H2, L2, C2 = O.shift(2), H.shift(2), L.shift(2), C.shift(2)
@@ -174,33 +168,48 @@ FEATURE_SETS = [
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 下載原始資料
+# 下載原始資料（多線程並行）
 # ══════════════════════════════════════════════════════════════════════════════
-def download_raw(log_fn: callable) -> dict:
-    """下載所有股票原始OHLCV，回傳 {ticker: df}"""
+def _download_one(ticker: str):
+    try:
+        df = yf.download(
+            ticker, start='2015-01-01', end='2025-12-31',
+            auto_adjust=False, progress=False, actions=False,
+        )
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [col[0] for col in df.columns]
+        required = {'Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close'}
+        if df.empty or len(df) < 100 or not required.issubset(df.columns):
+            return ticker, None
+        return ticker, df
+    except Exception:
+        return ticker, None
+
+
+def download_raw(log_fn: callable, progress_fn: callable = None) -> dict:
     raw_data = {}
-    tickers  = list(TW50.keys())
-    for i, ticker in enumerate(tickers):
-        log_fn(f"  [{i+1:02d}/{len(tickers)}] {ticker} {TW50[ticker]}...")
-        try:
-            df = yf.download(
-                ticker, start='2015-01-01', end='2025-12-31',
-                auto_adjust=False, progress=False, actions=False,
-            )
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [col[0] for col in df.columns]
-            required = {'Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close'}
-            if df.empty or len(df) < 100 or not required.issubset(df.columns):
-                log_fn("       → 跳過"); continue
-            raw_data[ticker] = df
-            log_fn(f"       → {len(df)} 筆 OK")
-        except Exception as e:
-            log_fn(f"       → 錯誤: {e}")
+    tickers = list(TW50.keys())
+    total = len(tickers)
+    log_fn(f"  並行下載 {total} 檔股票（10 線程）...")
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(_download_one, t): t for t in tickers}
+        for future in as_completed(futures):
+            ticker, df = future.result()
+            done += 1
+            if df is not None:
+                raw_data[ticker] = df
+                log_fn(f"  [{done:02d}/{total}] {ticker} {TW50[ticker]} → {len(df)} 筆")
+            else:
+                log_fn(f"  [{done:02d}/{total}] {ticker} → 跳過")
+            if progress_fn:
+                progress_fn(done, total)
+
     return raw_data
 
 
 def build_dataset(raw_data: dict, feat_fn) -> pd.DataFrame:
-    """用指定特徵函式建構全股票資料集"""
     parts = []
     for ticker, df in raw_data.items():
         try:
@@ -273,17 +282,9 @@ def train_ae(X: np.ndarray, input_dim: int, log_fn: callable) -> Autoencoder:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 找型態 + 訓練 AE + OCSVM（單一特徵集）
+# 找型態 + 訓練 AE + OCSVM
 # ══════════════════════════════════════════════════════════════════════════════
 def find_and_train(df: pd.DataFrame, feat_cols: list, log_fn: callable) -> dict:
-    """
-    老師要求流程：
-    Step1 - Euclidean Distance 相似度比對（取代 Cosine Similarity）
-    Step2 - 出現頻率 >= MIN_FREQ，平均報酬符合門檻
-    Step3 - 重要性權重 = 出現頻率 × |平均報酬|
-    Step4 - Autoencoder 壓縮至 Latent Space
-    Step5 - One-Class SVM（含重要性 sample_weight）
-    """
     train_df = df[(df.index >= TRAIN_START) & (df.index <= TRAIN_END)].copy()
     X = train_df[feat_cols].values.astype(np.float32)
     y = train_df['future_ret'].values.astype(np.float32)
@@ -299,13 +300,10 @@ def find_and_train(df: pd.DataFrame, feat_cols: list, log_fn: callable) -> dict:
 
     for direction, seeds in [('bull', bull_seeds), ('bear', bear_seeds)]:
         label  = '看漲' if direction == 'bull' else '看跌'
-        ret_ok = (lambda r: r > MIN_BULL_RET) if direction == 'bull' \
-                 else (lambda r: r < MIN_BEAR_RET)
         if len(seeds) == 0:
             models[direction] = None; continue
 
-        # Step1：Euclidean Distance 找有效型態（分批計算避免記憶體不足）
-        idx_importance = {}   # {樣本idx: 重要性分數}
+        idx_importance = {}
         valid_count    = 0
         top_patterns   = []
         BATCH = 200
@@ -313,17 +311,16 @@ def find_and_train(df: pd.DataFrame, feat_cols: list, log_fn: callable) -> dict:
         for batch_start in range(0, len(seeds), BATCH):
             batch_seeds = seeds[batch_start: batch_start + BATCH]
             batch_vecs  = X_scaled[batch_seeds]
-            dist_batch  = euclidean_distances(batch_vecs, X_scaled)  # (BATCH, N)
+            dist_batch  = euclidean_distances(batch_vecs, X_scaled)
 
             for j, seed_idx in enumerate(batch_seeds):
                 dists        = dist_batch[j].copy()
-                dists[seed_idx] = np.inf          # 排除自身
+                dists[seed_idx] = np.inf
                 similar_idx  = np.where(dists <= DIST_THRESH)[0]
                 if len(similar_idx) < MIN_FREQ:
                     continue
                 similar_rets = y[similar_idx]
 
-                # 每一根相似K線都必須符合報酬條件（非平均）
                 if direction == 'bull':
                     if not (similar_rets > MIN_BULL_RET).all():
                         continue
@@ -335,9 +332,8 @@ def find_and_train(df: pd.DataFrame, feat_cols: list, log_fn: callable) -> dict:
                 freq       = len(similar_idx)
                 win_rate   = float((similar_rets > 0).mean()) if direction == 'bull' \
                              else float((similar_rets < 0).mean())
-                importance = freq * abs(avg_ret)   # 老師要求：重要性 = 頻率 × |平均報酬|
+                importance = freq * abs(avg_ret)
 
-                # 記錄有效型態（取重要性最高的那次）
                 for idx in [seed_idx, *similar_idx.tolist()]:
                     if idx not in idx_importance or idx_importance[idx] < importance:
                         idx_importance[idx] = importance
@@ -346,7 +342,6 @@ def find_and_train(df: pd.DataFrame, feat_cols: list, log_fn: callable) -> dict:
 
         log_fn(f"  {label} 有效型態群：{valid_count}  有效樣本：{len(idx_importance):,}")
 
-        # 顯示前10個重要型態
         top_patterns.sort(key=lambda x: x[3], reverse=True)
         if top_patterns:
             log_fn(f"  {'排名':>4}  {'頻率':>6}  {'平均報酬':>10}  {'勝率':>8}  {'重要性':>10}")
@@ -356,7 +351,6 @@ def find_and_train(df: pd.DataFrame, feat_cols: list, log_fn: callable) -> dict:
         if len(idx_importance) == 0:
             models[direction] = None; continue
 
-        # Step2：用有效型態樣本訓練 Autoencoder
         sorted_idx    = sorted(idx_importance.keys())
         X_pattern     = X_scaled[sorted_idx]
         log_fn(f"\n  [{label}] 訓練 AE (input={len(feat_cols)}, latent={LATENT_DIM}, "
@@ -364,24 +358,23 @@ def find_and_train(df: pd.DataFrame, feat_cols: list, log_fn: callable) -> dict:
         ae = train_ae(X_pattern, len(feat_cols), log_fn)
         ae.eval()
 
-        # Step3：Latent Code → One-Class SVM（含重要性 sample_weight）
         with torch.no_grad():
             Z = ae.encode(torch.FloatTensor(X_pattern)).numpy()
 
         weights = np.array([idx_importance[i] for i in sorted_idx], dtype=np.float32)
-        weights = weights / weights.sum() * len(weights)   # 正規化
+        weights = weights / weights.sum() * len(weights)
 
         log_fn(f"  [{label}] 訓練 OCSVM（含重要性權重）...")
         ocsvm = OneClassSVM(kernel='rbf', nu=OCSVM_NU, gamma='scale')
         ocsvm.fit(Z, sample_weight=weights)
         models[direction] = {'ae': ae, 'ocsvm': ocsvm}
-        log_fn(f"  [{label}] 完成 ✓")
+        log_fn(f"  [{label}] 完成")
 
     return models
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 回測（單一特徵集 × 選定股票）
+# 回測
 # ══════════════════════════════════════════════════════════════════════════════
 def backtest(df: pd.DataFrame, feat_cols: list,
              models: dict, ticker: str) -> dict:
@@ -416,7 +409,6 @@ def backtest(df: pd.DataFrame, feat_cols: list,
             signal[mask & (signal != 1.0)] = -1.0
 
     strategy_ret = signal * y_test
-    # 扣除交易成本（每筆來回：手續費×2 + 交易稅 = 0.42%）
     strategy_ret[signal != 0] -= TRADE_COST
     n_buy   = int((signal ==  1).sum())
     n_sell  = int((signal == -1).sum())
@@ -442,96 +434,9 @@ def backtest(df: pd.DataFrame, feat_cols: list,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIM_THRESH 參數搜尋
-# ══════════════════════════════════════════════════════════════════════════════
-GRID_THRESHOLDS = [0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
-
-
-def grid_search_sim_thresh(df: pd.DataFrame, feat_cols: list,
-                            feat_name: str, log_fn: callable) -> list:
-    """
-    固定訓練一次 AE（全部訓練資料），
-    再對各 SIM_THRESH 分別跑 Cosine 過濾 + OCSVM，
-    比較訓練集 Precision，找最佳門檻。
-    """
-    train_df = df[(df.index >= TRAIN_START) & (df.index <= TRAIN_END)].copy()
-    X = train_df[feat_cols].values.astype(np.float32)
-    y = train_df['future_ret'].values.astype(np.float32)
-
-    scaler   = StandardScaler()
-    X_scaled = np.clip(scaler.fit_transform(X), -5, 5)
-
-    bull_seeds = np.where(y > RISE_THRESH)[0]
-    bear_seeds = np.where(y < FALL_THRESH)[0]
-
-    # ── AE 只訓練一次（全部資料）────────────────────────────────────────────
-    log_fn(f"  [{feat_name}] AE 訓練中（全資料，{len(X_scaled):,} 筆）...")
-    ae = train_ae(X_scaled, len(feat_cols), log_fn)
-    ae.eval()
-    with torch.no_grad():
-        Z_all = ae.encode(torch.FloatTensor(X_scaled)).numpy()
-    log_fn(f"  [{feat_name}] AE 完成，開始掃描門檻...")
-
-    results = []
-
-    for thresh in GRID_THRESHOLDS:
-        bull_valid, bear_valid = set(), set()
-
-        for seeds, valid_set, ret_ok in [
-            (bull_seeds, bull_valid, lambda r: r > MIN_BULL_RET),
-            (bear_seeds, bear_valid, lambda r: r < MIN_BEAR_RET),
-        ]:
-            for b in range(0, len(seeds), 200):
-                batch = seeds[b: b + 200]
-                sims  = cosine_similarity(X_scaled[batch], X_scaled)
-                for j, idx in enumerate(batch):
-                    row = sims[j].copy(); row[idx] = 0
-                    similar = np.where(row >= thresh)[0]
-                    if len(similar) < MIN_FREQ: continue
-                    if not ret_ok(float(y[similar].mean())): continue
-                    valid_set.add(idx)
-                    valid_set.update(similar.tolist())
-
-        precision_bull = precision_bear = 0.0
-
-        if len(bull_valid) >= 10:
-            ocsvm = OneClassSVM(kernel='rbf', nu=OCSVM_NU, gamma='scale')
-            ocsvm.fit(Z_all[sorted(bull_valid)])
-            pos = ocsvm.predict(Z_all) == 1
-            precision_bull = float((y[pos] > MIN_BULL_RET).mean()) if pos.sum() > 0 else 0.0
-
-        if len(bear_valid) >= 10:
-            ocsvm = OneClassSVM(kernel='rbf', nu=OCSVM_NU, gamma='scale')
-            ocsvm.fit(Z_all[sorted(bear_valid)])
-            pos = ocsvm.predict(Z_all) == 1
-            precision_bear = float((y[pos] < MIN_BEAR_RET).mean()) if pos.sum() > 0 else 0.0
-
-        avg_prec = (precision_bull + precision_bear) / 2
-        log_fn(f"  thresh={thresh:.2f}  "
-               f"漲樣本:{len(bull_valid):>5,}  跌樣本:{len(bear_valid):>5,}  "
-               f"P_漲:{precision_bull:.2%}  P_跌:{precision_bear:.2%}  "
-               f"均Precision:{avg_prec:.2%}")
-
-        results.append({
-            'thresh':         thresh,
-            'bull_samples':   len(bull_valid),
-            'bear_samples':   len(bear_valid),
-            'precision_bull': precision_bull,
-            'precision_bear': precision_bear,
-            'avg_precision':  avg_prec,
-        })
-
-    return results
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 特徵驗證（不回測）
+# 特徵驗證
 # ══════════════════════════════════════════════════════════════════════════════
 def validate_features(df: pd.DataFrame, feat_cols: list, log_fn: callable) -> dict:
-    """
-    訓練 AE + OCSVM，計算四大分類評估指標：
-    Precision、Recall、Accuracy、F1-Score（看漲 & 看跌各一組）
-    """
     train_df = df[(df.index >= TRAIN_START) & (df.index <= TRAIN_END)].copy()
     X = train_df[feat_cols].values.astype(np.float32)
     y = train_df['future_ret'].values.astype(np.float32)
@@ -547,13 +452,12 @@ def validate_features(df: pd.DataFrame, feat_cols: list, log_fn: callable) -> di
     with torch.no_grad():
         Z = ae.encode(torch.FloatTensor(X_scaled)).numpy()
 
-    bull_mask = y > RISE_THRESH   # 實際正例（看漲）
-    bear_mask = y < FALL_THRESH   # 實際正例（看跌）
+    bull_mask = y > RISE_THRESH
+    bear_mask = y < FALL_THRESH
     log_fn(f"  看漲種子：{bull_mask.sum():,}  看跌種子：{bear_mask.sum():,}")
 
     def calc_metrics(actual_pos: np.ndarray, pred_pos: np.ndarray,
                      label: str, log_fn) -> dict:
-        """計算 TP/TN/FP/FN 及四大指標"""
         N   = len(actual_pos)
         TP  = int(( pred_pos &  actual_pos).sum())
         TN  = int((~pred_pos & ~actual_pos).sum())
@@ -610,20 +514,18 @@ class KLineApp:
         self.root.geometry("1280x800")
         self.root.resizable(True, True)
 
-        self._raw_data = None   # {ticker: df}
+        self._raw_data = None
         self._running  = False
         self._queue    = queue.Queue()
 
         self._build_ui()
         self._poll()
 
-    # ── UI ────────────────────────────────────────────────────────────────────
     def _build_ui(self):
         self.root.columnconfigure(0, weight=0, minsize=210)
         self.root.columnconfigure(1, weight=1)
         self.root.rowconfigure(0, weight=1)
 
-        # 左側
         left = ttk.Frame(self.root, padding=14)
         left.grid(row=0, column=0, sticky='nsew')
 
@@ -649,11 +551,7 @@ class KLineApp:
                                    command=self._on_validate, state='disabled')
         self._btn_val.pack(fill='x', pady=4)
 
-        self._btn_grid = ttk.Button(left, text="③ 參數搜尋（SIM_THRESH）",
-                                    command=self._on_grid_search, state='disabled')
-        self._btn_grid.pack(fill='x', pady=4)
-
-        self._btn_run = ttk.Button(left, text="④ 分析 + 回測（三特徵集）",
+        self._btn_run = ttk.Button(left, text="③ 分析 + 回測（三特徵集）",
                                    command=self._on_run, state='disabled')
         self._btn_run.pack(fill='x', pady=4)
 
@@ -662,18 +560,17 @@ class KLineApp:
 
         ttk.Separator(left, orient='horizontal').pack(fill='x', pady=10)
 
-        # 說明
         note = (
             "固定參數：\n"
             f"  持有天數  : {HOLD_DAYS} 日\n"
             f"  大漲門檻  : >{RISE_THRESH}%\n"
             f"  大跌門檻  : <{FALL_THRESH}%\n"
-            f"  相似度門檻: {SIM_THRESH}\n"
+            f"  距離門檻  : {DIST_THRESH}\n"
             f"  最少出現  : {MIN_FREQ} 次\n"
             f"  AE 潛在維度: {LATENT_DIM}\n"
             f"  AE Epochs : {EPOCHS}\n"
             f"  OCSVM nu  : {OCSVM_NU}\n"
-            f"  手續費    : {BROKERAGE}% × 2\n"
+            f"  手續費    : {BROKERAGE}% x 2\n"
             f"  交易稅    : {TAX}%（賣出）\n"
             f"  每筆成本  : {TRADE_COST}%\n"
             f"  訓練期間  : 2016-2024\n"
@@ -682,10 +579,14 @@ class KLineApp:
         ttk.Label(left, text=note, font=('Consolas', 9),
                   foreground='gray', justify='left').pack(anchor='w')
 
-        self._progress = ttk.Progressbar(left, mode='indeterminate')
+        self._progress = ttk.Progressbar(left, mode='determinate',
+                                         maximum=100)
         self._progress.pack(fill='x', pady=(16, 0))
 
-        # 右側
+        self._progress_label = ttk.Label(left, text="", font=('', 9),
+                                         foreground='gray')
+        self._progress_label.pack(anchor='w', pady=(2, 0))
+
         right = ttk.Frame(self.root, padding=10)
         right.grid(row=0, column=1, sticky='nsew')
         right.rowconfigure(0, weight=2)
@@ -708,27 +609,28 @@ class KLineApp:
                 if kind == 'log':
                     self._log_box.insert(tk.END, data + '\n')
                     self._log_box.see(tk.END)
+                elif kind == 'progress':
+                    done, total = data
+                    pct = int(done / total * 100)
+                    self._progress['value'] = pct
+                    self._progress_label.config(text=f"{done}/{total} ({pct}%)")
                 elif kind == 'done_dl':
-                    self._progress.stop()
+                    self._progress['value'] = 100
+                    self._progress_label.config(text="下載完成")
                     self._running = False
                     self._btn_val.config(state='normal')
-                    self._btn_grid.config(state='normal')
                     self._btn_run.config(state='normal')
                 elif kind == 'done_run':
-                    self._progress.stop()
+                    self._progress['value'] = 100
+                    self._progress_label.config(text="完成")
                     self._running = False
                 elif kind == 'plot':
                     self._draw_plot(data)
-                elif kind == 'plot_val':
-                    pass
                 elif kind == 'plot_cm':
                     self._draw_confusion_matrices(data)
-                elif kind == 'plot_grid':
-                    self._draw_grid_results(data)
-                elif kind == 'apply_best_thresh':
-                    self._apply_best_thresh(data)
                 elif kind == 'error':
-                    self._progress.stop()
+                    self._progress['value'] = 0
+                    self._progress_label.config(text="")
                     self._running = False
                     messagebox.showerror("錯誤", data)
         except queue.Empty:
@@ -738,20 +640,15 @@ class KLineApp:
     def _log(self, text: str):
         self._queue.put(('log', text))
 
-    # ── 按鈕 ──────────────────────────────────────────────────────────────────
-    def _on_grid_search(self):
-        if self._running or self._raw_data is None: return
-        self._running = True
-        self._progress.start()
-        self._log("\n" + "=" * 58)
-        self._log(f" [3] SIM_THRESH 參數搜尋（測試：{GRID_THRESHOLDS}）")
-        self._log("=" * 58)
-        threading.Thread(target=self._worker_grid_search, daemon=True).start()
+    def _set_progress(self, done: int, total: int):
+        self._queue.put(('progress', (done, total)))
 
+    # ── 按鈕 ──────────────────────────────────────────────────────────────────
     def _on_validate(self):
         if self._running or self._raw_data is None: return
         self._running = True
-        self._progress.start()
+        self._progress['value'] = 0
+        self._progress_label.config(text="驗證中...")
         self._log("\n" + "=" * 58)
         self._log(" [2] 特徵驗證（訓練 AE + OCSVM，不跑回測）")
         self._log("=" * 58)
@@ -760,7 +657,8 @@ class KLineApp:
     def _on_download(self):
         if self._running: return
         self._running = True
-        self._progress.start()
+        self._progress['value'] = 0
+        self._progress_label.config(text="下載中...")
         self._log("=" * 58)
         self._log(" [1] 下載台灣前50大股票原始資料")
         self._log("=" * 58)
@@ -769,13 +667,15 @@ class KLineApp:
     def _on_run(self):
         if self._running or self._raw_data is None: return
         self._running = True
-        self._progress.start()
+        self._progress['value'] = 0
         ticker = self._ticker_var.get().strip().upper()
         if not ticker:
             messagebox.showwarning("提示", "請輸入股票代號")
+            self._running = False
             return
+        self._progress_label.config(text="分析中...")
         self._log("\n" + "=" * 58)
-        self._log(f" [2] 分析 + 回測：{ticker} {TW50.get(ticker, '')}")
+        self._log(f" [3] 分析 + 回測：{ticker} {TW50.get(ticker, '')}")
         self._log("=" * 58)
         threading.Thread(target=self._worker_run,
                          args=(ticker,), daemon=True).start()
@@ -784,51 +684,15 @@ class KLineApp:
         self._log_box.delete('1.0', tk.END)
         self._fig.clear()
         self._canvas.draw()
+        self._progress['value'] = 0
+        self._progress_label.config(text="")
 
     # ── Workers ───────────────────────────────────────────────────────────────
-    def _worker_grid_search(self):
-        try:
-            all_grid = {}   # {feat_name: [result_per_thresh]}
-
-            for feat_name, feat_fn in FEATURE_SETS:
-                self._log(f"\n{'─'*55}")
-                self._log(f"  特徵集：{feat_name}")
-                self._log(f"{'─'*55}")
-                df        = build_dataset(self._raw_data, feat_fn)
-                feat_cols = [c for c in df.columns
-                             if c not in ('future_ret', 'ticker')]
-                results   = grid_search_sim_thresh(df, feat_cols, feat_name, self._log)
-                all_grid[feat_name] = results
-
-            # 找最佳門檻（三特徵集平均 Precision 最高者）
-            thresh_avg = {}
-            for thresh in GRID_THRESHOLDS:
-                avg = np.mean([
-                    next(r['avg_precision'] for r in res if r['thresh'] == thresh)
-                    for res in all_grid.values()
-                ])
-                thresh_avg[thresh] = avg
-
-            best_thresh = max(thresh_avg, key=thresh_avg.get)
-            self._log(f"\n{'='*58}")
-            self._log("  各門檻三特徵集平均 Precision：")
-            for t, p in thresh_avg.items():
-                mark = " ← 最佳" if t == best_thresh else ""
-                self._log(f"  SIM_THRESH={t:.2f}  均Precision: {p:.2%}{mark}")
-            self._log(f"\n  ★ 最佳 SIM_THRESH = {best_thresh}")
-
-            self._queue.put(('plot_grid', (all_grid, best_thresh)))
-            self._queue.put(('apply_best_thresh', best_thresh))
-            self._log("\n  ✓ 參數搜尋完成")
-            self._queue.put(('done_run', None))
-        except Exception as e:
-            import traceback
-            self._queue.put(('error', traceback.format_exc()))
-
     def _worker_validate(self):
         try:
             val_results = {}
-            for feat_name, feat_fn in FEATURE_SETS:
+            total_sets = len(FEATURE_SETS)
+            for i, (feat_name, feat_fn) in enumerate(FEATURE_SETS):
                 self._log(f"\n{'─'*55}")
                 self._log(f"  特徵集：{feat_name}")
                 self._log(f"{'─'*55}")
@@ -837,6 +701,7 @@ class KLineApp:
                              if c not in ('future_ret', 'ticker')]
                 result = validate_features(df, feat_cols, self._log)
                 val_results[feat_name] = result
+                self._set_progress(i + 1, total_sets)
 
             self._log(f"\n{'='*58}")
             self._log("  三特徵集驗證摘要")
@@ -854,7 +719,7 @@ class KLineApp:
                         )
 
             self._queue.put(('plot_cm', val_results))
-            self._log("\n  ✓ 特徵驗證完成")
+            self._log("\n  完成")
             self._queue.put(('done_run', None))
         except Exception as e:
             import traceback
@@ -862,17 +727,16 @@ class KLineApp:
 
     def _worker_download(self):
         try:
-            raw = download_raw(self._log)
+            raw = download_raw(self._log, self._set_progress)
             self._raw_data = raw
             self._log(f"\n  成功下載：{len(raw)} 檔")
-            self._log("  ✓ 下載完成，請點擊「② 分析 + 回測」")
+            self._log("  下載完成，可開始分析")
             self._queue.put(('done_dl', None))
         except Exception as e:
             self._queue.put(('error', str(e)))
 
     def _worker_run(self, ticker: str):
         try:
-            # 若輸入的股票不在已下載清單中，補下載
             if ticker not in self._raw_data:
                 self._log(f"  {ticker} 不在台灣50清單，補充下載...")
                 try:
@@ -891,9 +755,10 @@ class KLineApp:
                     self._queue.put(('error', f"{ticker} 下載失敗：{e}"))
                     return
 
-            results = {}   # {feat_name: backtest_result}
+            results = {}
+            total_sets = len(FEATURE_SETS)
 
-            for feat_name, feat_fn in FEATURE_SETS:
+            for i, (feat_name, feat_fn) in enumerate(FEATURE_SETS):
                 self._log(f"\n{'─'*55}")
                 self._log(f"  特徵集：{feat_name}")
                 self._log(f"{'─'*55}")
@@ -921,7 +786,8 @@ class KLineApp:
                 else:
                     self._log("  （無符合型態的訊號）")
 
-            # 總結
+                self._set_progress(i + 1, total_sets)
+
             self._log(f"\n{'='*58}")
             self._log(f"  三特徵集比較總結 ({ticker} {TW50.get(ticker,'')} 2025)")
             self._log(f"{'='*58}")
@@ -932,88 +798,13 @@ class KLineApp:
                           f"{r['win_rate']:>7.2%}  {r['cum_ret']:>+9.2f}%")
 
             self._queue.put(('plot', results))
-            self._log("\n  ✓ 分析完成")
+            self._log("\n  分析完成")
             self._queue.put(('done_run', None))
         except Exception as e:
             import traceback
             self._queue.put(('error', traceback.format_exc()))
 
-    # ── 最佳門檻寫回全域變數並更新原始碼 ────────────────────────────────────
-    def _apply_best_thresh(self, best_thresh: float):
-        global SIM_THRESH
-        SIM_THRESH = best_thresh
-        self._log(f"\n  ✔ SIM_THRESH 已自動更新為 {best_thresh}（本次執行期間有效）")
-
-        # 同步寫回 .py 原始碼，讓下次啟動也沿用最佳值
-        try:
-            src = __file__
-            with open(src, 'r', encoding='utf-8') as f:
-                code = f.read()
-            import re
-            new_code = re.sub(
-                r'^SIM_THRESH\s*=\s*[\d.]+',
-                f'SIM_THRESH   = {best_thresh}',
-                code, flags=re.MULTILINE
-            )
-            with open(src, 'w', encoding='utf-8') as f:
-                f.write(new_code)
-            self._log(f"  ✔ 已將 SIM_THRESH={best_thresh} 寫入原始碼（永久生效）")
-        except Exception as e:
-            self._log(f"  [警告] 無法寫入原始碼：{e}")
-
-    # ── 參數搜尋結果圖 ────────────────────────────────────────────────────────
-    def _draw_grid_results(self, payload):
-        all_grid, best_thresh = payload
-        self._fig.clear()
-
-        n_feat = len(all_grid)
-        colors = ['steelblue', 'darkorange', 'green']
-
-        for col, (feat_name, results) in enumerate(all_grid.items()):
-            thresholds     = [r['thresh']         for r in results]
-            prec_bull      = [r['precision_bull']  for r in results]
-            prec_bear      = [r['precision_bear']  for r in results]
-            avg_prec       = [r['avg_precision']   for r in results]
-            bull_samples   = [r['bull_samples']    for r in results]
-
-            # 上排：Precision vs Threshold
-            ax1 = self._fig.add_subplot(2, n_feat, col + 1)
-            ax1.plot(thresholds, prec_bull, 'o-', color='#2ecc71',
-                     label='看漲P', linewidth=1.5)
-            ax1.plot(thresholds, prec_bear, 's-', color='#e74c3c',
-                     label='看跌P', linewidth=1.5)
-            ax1.plot(thresholds, avg_prec, '^--', color=colors[col],
-                     label='均P', linewidth=2)
-            ax1.axvline(best_thresh, color='gold', linestyle='--',
-                        linewidth=1.5, label=f'最佳={best_thresh}')
-            ax1.set_title(f"{feat_name}\nPrecision vs SIM_THRESH", fontsize=9)
-            ax1.set_xlabel('SIM_THRESH', fontsize=8)
-            ax1.set_ylabel('Precision', fontsize=8)
-            ax1.yaxis.set_major_formatter(
-                plt.FuncFormatter(lambda v, _: f'{v:.0%}'))
-            ax1.legend(fontsize=7)
-            ax1.grid(alpha=0.3)
-
-            # 下排：有效樣本數 vs Threshold
-            ax2 = self._fig.add_subplot(2, n_feat, n_feat + col + 1)
-            ax2.bar([str(t) for t in thresholds], bull_samples,
-                    color=colors[col], alpha=0.7)
-            best_idx = thresholds.index(best_thresh)
-            ax2.bar(str(best_thresh), bull_samples[best_idx],
-                    color='gold', alpha=0.9)
-            ax2.set_title('看漲有效樣本數', fontsize=9)
-            ax2.set_xlabel('SIM_THRESH', fontsize=8)
-            ax2.set_ylabel('樣本數', fontsize=8)
-            ax2.grid(alpha=0.3, axis='y')
-
-        self._fig.suptitle(
-            f'SIM_THRESH 參數搜尋結果  ★ 最佳門檻 = {best_thresh}',
-            fontsize=11, fontweight='bold'
-        )
-        self._fig.tight_layout()
-        self._canvas.draw()
-
-    # ── 混淆矩陣圖（2列×3行：上看漲、下看跌）────────────────────────────────
+    # ── 混淆矩陣圖 ────────────────────────────────────────────────────────────
     def _draw_confusion_matrices(self, val_results: dict):
         self._fig.clear()
         feat_names = list(val_results.keys())
@@ -1058,19 +849,16 @@ class KLineApp:
         self._fig.tight_layout()
         self._canvas.draw()
 
-    # ── 繪圖（三特徵集累積報酬對比）────────────────────────────────────────
+    # ── 繪圖（累積報酬對比）──────────────────────────────────────────────────
     def _draw_plot(self, results: dict):
         self._fig.clear()
         n = len(results)
         if n == 0: return
 
         colors = ['steelblue', 'darkorange', 'green']
-        axes   = []
 
-        # 上排：各特徵集累積報酬
         for i, (name, res) in enumerate(results.items()):
             ax = self._fig.add_subplot(1, n, i + 1)
-            axes.append(ax)
             active = res['signal'] != 0
             if active.sum() > 0:
                 cum = pd.Series(
