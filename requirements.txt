@@ -2,6 +2,7 @@ yfinance
 pandas
 numpy
 matplotlib
-scikit-learn
+plotly
 scipy
+scikit-learn
 tensorflow
