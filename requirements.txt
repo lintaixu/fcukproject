@@ -2,7 +2,5 @@ yfinance
 pandas
 numpy
 matplotlib
-plotly
-scipy
 scikit-learn
-tensorflow
+torch
