@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Claude_Preview__preview_start",
+      "Bash(python kline_pattern_search.py)",
+      "WebSearch",
+      "Bash(python run_grid_search.py)",
+      "Bash(python run_dist_grid_search.py)",
+      "Bash(start pythonw:*)",
+      "Bash(start cmd:*)",
+      "Bash(cmd /c \"cd /d C:\\\\Users\\\\alex\\\\Desktop\\\\專題進度\\\\0401 && python run_full_grid_search.py\")",
+      "Bash(python run_full_grid_search.py)",
+      "Bash(python run_nu_search.py)"
+    ]
+  }
+}

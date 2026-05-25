@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "K線型態搜尋 (Tkinter GUI)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["kline_pattern_search.py"],
+      "port": 0
+    },
+    {
+      "name": "Autoencoder + OCSVM 回測 (CLI)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["kline_autoencoder_ocsvm.py"],
+      "port": 0
+    }
+  ]
+}
