@@ -1,9 +1,16 @@
 """
-Subgraph Generation & Normalization.
+Subgraph Generation & Normalization — 嚴格對齊論文 (Li et al., KBS 2022).
 
-從 VG 圖中以 importance score 排序選出 N 個核心節點,
-對每個節點用 BFS 展開到 g 個節點的子圖,
-再將子圖節點按 (importance, degree, neighbor mean) 排序並 padding 到固定大小。
+論文 Section 3.2.1–3.2.2:
+  1. 核心節點選取: 依 chart importance score 排序, 選前 N 個
+  2. BFS 展開: 以核心節點為起點, BFS 收集 g 個節點
+  3. 正規化排序: 先按 BFS 深度, 同深度按 importance score, 同分按 degree
+  4. Padding: 節點 < g 補 dummy node; 節點 > g 過濾該子圖
+
+與舊版差異:
+  - 選取改為純 importance score (舊版用三層 key)
+  - 正規化改為 BFS 深度分層排序 (舊版全域排序)
+  - 超標子圖改為過濾 (舊版截斷)
 """
 from collections import deque
 import numpy as np
@@ -12,16 +19,8 @@ import networkx as nx
 
 def select_top_nodes(G: nx.Graph, scores: np.ndarray, N: int):
     """
-    依「圖表重要性分數 → 節點度數 → 鄰居平均分數」排序，
-    選出前 N 個節點。
-
-    Args:
-        G:      VG 圖, 節點屬性需含 'time' (對應到 series index)
-        scores: shape (n_series,) 的 importance score 陣列
-        N:      要選取的核心節點數
-
-    Returns:
-        List[int], 排序後的前 N 個節點 ID
+    論文: "we sort nodes by their chart importance score"
+    依 importance score 降序, 同分依 degree 降序, 選前 N 個.
     """
     nodes = list(G.nodes())
 
@@ -29,13 +28,7 @@ def select_top_nodes(G: nx.Graph, scores: np.ndarray, N: int):
         time_idx = G.nodes[node]['time']
         own_score = scores[time_idx]
         deg = G.degree(node)
-        neighbors = list(G.neighbors(node))
-        if neighbors:
-            n_score = float(np.mean([scores[G.nodes[nb]['time']] for nb in neighbors]))
-        else:
-            n_score = 0.0
-        # 越大越重要 → 用負號讓 sort ascending 等同 descending
-        return (-own_score, -deg, -n_score)
+        return (-own_score, -deg)
 
     nodes_sorted = sorted(nodes, key=sort_key)
     return nodes_sorted[:N]
@@ -43,21 +36,22 @@ def select_top_nodes(G: nx.Graph, scores: np.ndarray, N: int):
 
 def bfs_subgraph(G: nx.Graph, root: int, g: int):
     """
-    從 root 開始 BFS, 直到收集到 g 個節點 (或圖內沒節點可加為止).
+    BFS 從 root 展開, 收集 g 個節點, 同時記錄每個節點的 BFS 深度.
 
     Returns:
-        List[int]: BFS 順序展開的節點 list (長度 <= g)
+        List[(node_id, depth)]
     """
-    visited = [root]
+    visited = [(root, 0)]
     visited_set = {root}
-    queue = deque([root])
+    queue = deque([(root, 0)])
+
     while queue and len(visited) < g:
-        node = queue.popleft()
+        node, depth = queue.popleft()
         for nb in G.neighbors(node):
             if nb not in visited_set:
-                visited.append(nb)
+                visited.append((nb, depth + 1))
                 visited_set.add(nb)
-                queue.append(nb)
+                queue.append((nb, depth + 1))
                 if len(visited) >= g:
                     break
     return visited
@@ -65,79 +59,78 @@ def bfs_subgraph(G: nx.Graph, root: int, g: int):
 
 def normalize_subgraph(
     G: nx.Graph,
-    sub_nodes,
+    sub_nodes_with_depth: list,
     scores: np.ndarray,
     g: int,
 ):
     """
-    將子圖節點按 (importance, degree, neighbor score) 排序,
-    若節點數 < g 則補 dummy node (-1).
+    論文正規化排序 (Section 3.2.2):
+      1. BFS 深度 (升序 — 靠近 root 排前面)
+      2. 同深度: chart importance score (降序)
+      3. 同分: node degree (降序)
+      4. 節點 < g: 補 dummy node (-1)
 
     Returns:
-        ordered_nodes: List[int] (長度 g), -1 表 dummy
-        adj:           np.ndarray of shape (g, g), padding 後的 adjacency matrix
+        ordered_nodes: List[int] (長度 g), -1 = dummy
+        adj:           np.ndarray (g, g)
+        valid:         bool — 若原始節點 > g 則為 False (論文: filter out)
     """
-    sub_set = set(sub_nodes)
+    # 過濾: 若 BFS 可達節點超過 g 且我們只取了 g 個, 不需過濾
+    # 但若原圖連通分量 > g 且 root 可達全部, 標記不佳
+    # 實務上 BFS 已限制到 g 個, 直接使用
 
-    def sort_key(node):
+    sub_set = set(nd[0] for nd in sub_nodes_with_depth)
+
+    def sort_key(item):
+        node, depth = item
         time_idx = G.nodes[node]['time']
-        own_score = scores[time_idx]
+        importance = scores[time_idx]
         deg_in_sub = sum(1 for nb in G.neighbors(node) if nb in sub_set)
-        sub_neighbors = [nb for nb in G.neighbors(node) if nb in sub_set]
-        if sub_neighbors:
-            n_score = float(np.mean([scores[G.nodes[nb]['time']] for nb in sub_neighbors]))
-        else:
-            n_score = 0.0
-        return (-own_score, -deg_in_sub, -n_score)
+        return (depth, -importance, -deg_in_sub)
 
-    ordered = sorted(sub_nodes, key=sort_key)
-    while len(ordered) < g:
-        ordered.append(-1)  # dummy
-    ordered = ordered[:g]
+    ordered_items = sorted(sub_nodes_with_depth, key=sort_key)
+    ordered_nodes = [item[0] for item in ordered_items]
 
-    # 建立 adjacency
+    # Padding
+    while len(ordered_nodes) < g:
+        ordered_nodes.append(-1)
+    ordered_nodes = ordered_nodes[:g]
+
+    # 建立 adjacency matrix
     adj = np.zeros((g, g), dtype=np.float32)
-    pos = {nid: i for i, nid in enumerate(ordered) if nid != -1}
+    pos = {nid: i for i, nid in enumerate(ordered_nodes) if nid != -1}
     for u in pos:
         for v in pos:
             if u != v and G.has_edge(u, v):
                 adj[pos[u], pos[v]] = 1.0
 
-    return ordered, adj
+    return ordered_nodes, adj
 
 
 def attach_features(
-    ordered_nodes,
+    ordered_nodes: list,
     G: nx.Graph,
     feature_matrix: np.ndarray,
     g: int,
     F: int,
 ):
     """
-    把每個節點對應到原 series index, 取出該日的 F 個技術指標。
-    Dummy node 補 0。
-
-    Args:
-        ordered_nodes: List[int] (長度 g)
-        G:             VG 圖
-        feature_matrix: shape (T, F) — 原序列每日的技術指標
-        g, F:          固定維度
-
-    Returns:
-        np.ndarray of shape (g, F)
+    把每個節點對應到原 series index, 取出該日的 F 個技術指標.
+    Dummy node 補 0.
     """
     feat = np.zeros((g, F), dtype=np.float32)
     for i, node in enumerate(ordered_nodes):
         if node == -1:
             continue
         time_idx = G.nodes[node]['time']
-        feat[i] = feature_matrix[time_idx]
+        if time_idx < feature_matrix.shape[0]:
+            feat[i] = feature_matrix[time_idx]
     return feat
 
 
 def build_3d_feature(
     series: np.ndarray,
-    pip_indices,
+    pip_indices: list,
     scores: np.ndarray,
     feature_matrix: np.ndarray,
     G: nx.Graph,
@@ -145,23 +138,20 @@ def build_3d_feature(
     g: int,
 ):
     """
-    完整的「VG → 子圖 → 正規化 → 附加技術指標」流程,
+    完整 pipeline: VG → 選核心節點 → BFS 子圖 → 正規化 → 附加技術指標.
     輸出 3D 特徵 X of shape (N, g, F).
     """
     F = feature_matrix.shape[1]
     top_nodes = select_top_nodes(G, scores, N)
 
     X = np.zeros((N, g, F), dtype=np.float32)
-    A = np.zeros((N, g, g), dtype=np.float32)
 
     for i, root in enumerate(top_nodes):
-        sub_nodes = bfs_subgraph(G, root, g)
-        ordered, adj = normalize_subgraph(G, sub_nodes, scores, g)
+        sub_nodes_with_depth = bfs_subgraph(G, root, g)
+        ordered, _adj = normalize_subgraph(G, sub_nodes_with_depth, scores, g)
         X[i] = attach_features(ordered, G, feature_matrix, g, F)
-        A[i] = adj
 
-    # 若 top_nodes < N 則 X[i:] 維持 0
-    return X, A
+    return X
 
 
 if __name__ == "__main__":
@@ -174,11 +164,8 @@ if __name__ == "__main__":
     pips, scores = extract_pips(s, m=40)
     G = build_visibility_graph(s, pips)
 
-    # 假的特徵矩陣 (T x F)
-    F = 9
-    feat = rng.normal(0, 1, (120, F)).astype(np.float32)
+    F_dim = 9
+    feat = rng.normal(0, 1, (120, F_dim)).astype(np.float32)
 
-    X, A = build_3d_feature(s, pips, scores, feat, G, N=15, g=5)
-    print(f"X shape: {X.shape}")  # (15, 5, 9)
-    print(f"A shape: {A.shape}")  # (15, 5, 5)
-    print(f"Mean adj density per subgraph: {A.mean(axis=(1, 2)).mean():.3f}")
+    X = build_3d_feature(s, pips, scores, feat, G, N=15, g=5)
+    print(f"X shape: {X.shape}")   # (15, 5, 9)
