@@ -1,94 +1,45 @@
-"""
-9 個技術指標 (對應論文 Table 1).
-
-Inputs: pandas DataFrame 含 'open', 'high', 'low', 'close' columns.
-Output: shape (T, 9) 的 numpy array, 已經 z-score 標準化.
-"""
 import numpy as np
 import pandas as pd
 
-
-def compute_indicators(df: pd.DataFrame, n: int = 14) -> np.ndarray:
-    """
-    Args:
-        df: DataFrame with columns ['open', 'high', 'low', 'close']
-        n:  時間窗口
-
-    Returns:
-        np.ndarray of shape (T, 9), z-score normalized
-    """
-    close = df['close'].astype(float)
-    high = df['high'].astype(float)
-    low = df['low'].astype(float)
-
-    # 1. Simple n-day MA
-    sma = close.rolling(n).mean()
-
-    # 2. Weighted n-day MA
-    weights = np.arange(1, n + 1)
-    wma = close.rolling(n).apply(
-        lambda x: np.dot(x, weights) / weights.sum(), raw=True
-    )
-
-    # 3. Momentum (n-day)
-    mom = close - close.shift(n - 1)
-
-    # 4. MACD (簡化版: 12-day EMA - 26-day EMA, 再做 9-day EMA)
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
-    diff = ema12 - ema26
-    macd = diff.ewm(span=9, adjust=False).mean()
-
-    # 5. Larry Williams %R
-    hh = high.rolling(n).max()
-    ll = low.rolling(n).min()
-    williams_r = (hh - close) / (hh - ll + 1e-9) * 100
-
-    # 6. CCI
-    typical = (high + low + close) / 3
-    sm = typical.rolling(n).mean()
-    md = typical.rolling(n).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True)
-    cci = (typical - sm) / (0.015 * md + 1e-9)
-
-    # 7. Stochastic K%
-    k = (close - ll) / (hh - ll + 1e-9) * 100
-
-    # 8. Stochastic D% (10-day moving average of K%, 對應論文 Table 1)
-    d = k.rolling(10).mean()
-
-    # 9. RSI
-    delta = close.diff()
-    up = delta.clip(lower=0).rolling(n).mean()
-    dw = (-delta).clip(lower=0).rolling(n).mean()
-    rs = up / (dw + 1e-9)
-    rsi = 100 - 100 / (1 + rs)
-
-    feats = np.stack(
-        [sma, wma, mom, macd, williams_r, cci, k, d, rsi], axis=1
-    )
-
-    # fill NaN with 0
+def compute_indicators(df: pd.DataFrame, n: int = 100) -> np.ndarray:
+    o = df['open'].astype(float).values
+    h = df['high'].astype(float).values
+    l = df['low'].astype(float).values
+    c = df['close'].astype(float).values
+    v = df['volume'].astype(float).values
+    T = len(c)
+    hl = h - l
+    hl = np.where(hl < 1e-9, 1e-9, hl)
+    prev_c = np.empty(T); prev_c[0] = c[0]; prev_c[1:] = c[:-1]
+    upper_shadow = (h - np.maximum(o, c)) / hl
+    lower_shadow = (np.minimum(o, c) - l) / hl
+    body = (c - o) / hl
+    gap = (o - prev_c) / (np.abs(prev_c) + 1e-9)
+    close_change = (c - prev_c) / (np.abs(prev_c) + 1e-9)
+    vol_ma5 = pd.Series(v).rolling(5, min_periods=1).mean().values
+    vol_ma5 = np.where(vol_ma5 < 1, 1, vol_ma5)
+    vol_ratio_5d = v / vol_ma5
+    c5 = np.empty(T); c5[:5] = c[:5]; c5[5:] = c[:-5]
+    trend_5d = (c - c5) / (np.abs(c5) + 1e-9)
+    prev_upper = np.empty(T); prev_upper[0] = 0; prev_upper[1:] = upper_shadow[:-1]
+    prev_lower = np.empty(T); prev_lower[0] = 0; prev_lower[1:] = lower_shadow[:-1]
+    prev_body = np.empty(T); prev_body[0] = 0; prev_body[1:] = body[:-1]
+    prev2_body = np.empty(T); prev2_body[:2] = 0; prev2_body[2:] = body[:-2]
+    c3 = np.empty(T); c3[:3] = c[:3]; c3[3:] = c[:-3]
+    cumul_3d = (c - c3) / (np.abs(c3) + 1e-9)
+    vol_ma3 = pd.Series(v).rolling(3, min_periods=1).mean().values
+    vol_ma3 = np.where(vol_ma3 < 1, 1, vol_ma3)
+    vol_ratio_3d = v / vol_ma3
+    h20 = pd.Series(h).rolling(20, min_periods=1).max().values
+    l20 = pd.Series(l).rolling(20, min_periods=1).min().values
+    range20 = h20 - l20
+    range20 = np.where(range20 < 1e-9, 1e-9, range20)
+    range_pos = (c - l20) / range20
+    feats = np.stack([upper_shadow, lower_shadow, body, gap, close_change,
+        vol_ratio_5d, trend_5d, prev_upper, prev_lower, prev_body,
+        prev2_body, cumul_3d, vol_ratio_3d, range_pos], axis=1)
     feats = np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
-
-    # z-score per column (over the entire series)
     mean = feats.mean(axis=0, keepdims=True)
     std = feats.std(axis=0, keepdims=True) + 1e-9
     feats = (feats - mean) / std
-
     return feats.astype(np.float32)
-
-
-if __name__ == "__main__":
-    rng = np.random.default_rng(42)
-    n_days = 300
-    close = 100 + np.cumsum(rng.normal(0, 1, n_days))
-    df = pd.DataFrame({
-        'open': close + rng.normal(0, 0.3, n_days),
-        'high': close + np.abs(rng.normal(0, 0.5, n_days)),
-        'low': close - np.abs(rng.normal(0, 0.5, n_days)),
-        'close': close,
-    })
-    feats = compute_indicators(df, n=14)
-    print(f"feats shape: {feats.shape}")
-    print(f"feats stats: mean={feats.mean():.3f}, std={feats.std():.3f}")
-    print(f"feats sample (last row): {feats[-1]}")
