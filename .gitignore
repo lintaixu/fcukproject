@@ -1,3 +1,11 @@
 __pycache__/
 cache/
 ~$*
+
+# 非本專案的個人檔案（不納入版控）
+.claude/
+add_motivation_slide.py
+make_comparison_ppt.py
+trend_signal.py
+Chart GCN Learning chart information with a graph convolutional network for stock movement prediction.pdf
+特徵對比實驗*.pptx

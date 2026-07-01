@@ -1,5 +1,7 @@
 """用 Grid Search 最佳參數執行最終訓練 + 回測."""
 import torch
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "core"))
 from data_loader import fetch_tw_stocks, TW50_TICKERS
 from dataset import ChartGCNDataset, split_by_date
 from torch.utils.data import random_split

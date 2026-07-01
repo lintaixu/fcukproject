@@ -1,5 +1,7 @@
 """用全部 50 檔台股執行訓練 + 回測（測試資料量是否改善結果）."""
 import torch
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "core"))
 from data_loader import fetch_tw_stocks, TW50_TICKERS
 from dataset import ChartGCNDataset, split_by_date
 from torch.utils.data import random_split

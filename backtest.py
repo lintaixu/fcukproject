@@ -17,6 +17,8 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "core"))
 from model import ChartGCN
 from dataset import ChartGCNDataset
 from train import DateGroupedBatchSampler

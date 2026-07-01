@@ -15,6 +15,8 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import networkx as nx
 
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "core"))
 from data_loader import fetch_tw_stocks
 from pip_algorithm import extract_pips
 from vg_graph import build_visibility_graph

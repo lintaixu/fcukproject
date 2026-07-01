@@ -9,6 +9,8 @@ import sys
 import torch
 from torch.utils.data import random_split
 
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "core"))
 from data_loader import fetch_tw_stocks, TW100_TICKERS
 from dataset import ChartGCNDataset, split_by_date
 from train import fit

@@ -16,6 +16,8 @@ from torch.utils.data import DataLoader, random_split
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
 
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "core"))
 from data_loader import fetch_tw_stocks, TW50_TICKERS
 from dataset import ChartGCNDataset, split_by_date
 
