@@ -97,7 +97,7 @@ def features_1day(df: pd.DataFrame) -> pd.DataFrame:
     gap       = (O - Cp) / C * 100
     close_chg = (C - Cp) / C * 100
     v5ma      = V.rolling(5, min_periods=5).mean()
-    vol_ratio = (V - v5ma) / V.replace(0, np.nan)
+    vol_ratio = (V - v5ma) / v5ma.replace(0, np.nan)
     trend     = (C.shift(2) - C.shift(7)) / C.shift(7) * 100
     return pd.DataFrame({
         'upper': upper, 'lower': lower, 'body': body,
@@ -118,7 +118,7 @@ def features_2day(df: pd.DataFrame) -> pd.DataFrame:
     gap       = (O  - C1) / C  * 100
     close_chg = (C  - C1) / C  * 100
     v5ma      = V.rolling(5, min_periods=5).mean()
-    vol_ratio = (V  - v5ma) / V.replace(0, np.nan)
+    vol_ratio = (V  - v5ma) / v5ma.replace(0, np.nan)
     trend     = (C.shift(2) - C.shift(7)) / C.shift(7) * 100
     return pd.DataFrame({
         'upper': upper, 'lower': lower, 'body': body,
@@ -143,7 +143,7 @@ def features_3day(df: pd.DataFrame) -> pd.DataFrame:
     p1_close_chg = (C1 - C2) / C1 * 100
     cum_return   = (C  - C2) / C2 * 100
     v3ma         = V.rolling(3, min_periods=3).mean()
-    vol_ratio_3  = (V - v3ma) / V.replace(0, np.nan)
+    vol_ratio_3  = (V - v3ma) / v3ma.replace(0, np.nan)
     h_max = pd.concat([H, H1, H2], axis=1).max(axis=1)
     l_min = pd.concat([L, L1, L2], axis=1).min(axis=1)
     denom = h_max - l_min
@@ -408,17 +408,26 @@ def backtest(df: pd.DataFrame, feat_cols: list,
         else:
             signal[mask & (signal != 1.0)] = -1.0
 
-    strategy_ret = signal * y_test
-    strategy_ret[signal != 0] -= TRADE_COST
-    n_buy   = int((signal ==  1).sum())
-    n_sell  = int((signal == -1).sum())
-    n_total = int((signal !=  0).sum())
+    # 非重疊持倉：每筆報酬為未來 HOLD_DAYS 日報酬，
+    # 進場後持有期間內的新訊號一律忽略，避免同一段行情被重複計算
+    executed  = np.zeros_like(signal)
+    next_free = 0
+    for i in range(len(signal)):
+        if signal[i] != 0 and i >= next_free:
+            executed[i] = signal[i]
+            next_free = i + HOLD_DAYS
+
+    strategy_ret = executed * y_test
+    strategy_ret[executed != 0] -= TRADE_COST
+    n_buy   = int((executed ==  1).sum())
+    n_sell  = int((executed == -1).sum())
+    n_total = int((executed !=  0).sum())
 
     if n_total > 0:
-        act      = strategy_ret[signal != 0]
+        act      = strategy_ret[executed != 0]
         avg_ret  = float(act.mean())
-        avg_bull = float(strategy_ret[signal ==  1].mean()) if n_buy  > 0 else 0.0
-        avg_bear = float(strategy_ret[signal == -1].mean()) if n_sell > 0 else 0.0
+        avg_bull = float(strategy_ret[executed ==  1].mean()) if n_buy  > 0 else 0.0
+        avg_bear = float(strategy_ret[executed == -1].mean()) if n_sell > 0 else 0.0
         win_rate = float((act > 0).mean())
         cum_ret  = float(act.sum())
     else:
@@ -426,7 +435,8 @@ def backtest(df: pd.DataFrame, feat_cols: list,
 
     return {
         'strategy_ret': strategy_ret,
-        'signal':       signal,
+        'signal':       executed,
+        'raw_signal':   signal,
         'n_buy':   n_buy,   'n_sell':  n_sell,  'n_total': n_total,
         'avg_ret': avg_ret, 'avg_bull': avg_bull,'avg_bear': avg_bear,
         'win_rate': win_rate, 'cum_ret': cum_ret,
@@ -438,22 +448,35 @@ def backtest(df: pd.DataFrame, feat_cols: list,
 # ══════════════════════════════════════════════════════════════════════════════
 def validate_features(df: pd.DataFrame, feat_cols: list, log_fn: callable) -> dict:
     train_df = df[(df.index >= TRAIN_START) & (df.index <= TRAIN_END)].copy()
-    X = train_df[feat_cols].values.astype(np.float32)
-    y = train_df['future_ret'].values.astype(np.float32)
 
-    scaler   = StandardScaler()
-    X_scaled = np.clip(scaler.fit_transform(X), -5, 5)
+    # 依日期切 80/20：前 80% 訓練 AE+OCSVM，後 20% 做 out-of-sample 驗證
+    dates      = train_df.index.unique().sort_values()
+    split_date = dates[int(len(dates) * 0.8)]
+    fit_df     = train_df[train_df.index <  split_date]
+    val_df     = train_df[train_df.index >= split_date]
+    log_fn(f"  訓練段：{len(fit_df):,} 筆 (~{str(split_date)[:10]})  "
+           f"驗證段：{len(val_df):,} 筆")
+
+    X_fit = fit_df[feat_cols].values.astype(np.float32)
+    y_fit = fit_df['future_ret'].values.astype(np.float32)
+    X_val = val_df[feat_cols].values.astype(np.float32)
+    y_val = val_df['future_ret'].values.astype(np.float32)
+
+    scaler  = StandardScaler()
+    X_fit_s = np.clip(scaler.fit_transform(X_fit), -5, 5)
+    X_val_s = np.clip(scaler.transform(X_val), -5, 5)
 
     log_fn(f"  [AE] 訓練中 (input={len(feat_cols)}, latent={LATENT_DIM}, "
-           f"樣本={len(X_scaled):,})...")
-    ae = train_ae(X_scaled, len(feat_cols), log_fn)
+           f"樣本={len(X_fit_s):,})...")
+    ae = train_ae(X_fit_s, len(feat_cols), log_fn)
     ae.eval()
 
     with torch.no_grad():
-        Z = ae.encode(torch.FloatTensor(X_scaled)).numpy()
+        Z     = ae.encode(torch.FloatTensor(X_fit_s)).numpy()
+        Z_val = ae.encode(torch.FloatTensor(X_val_s)).numpy()
 
-    bull_mask = y > RISE_THRESH
-    bear_mask = y < FALL_THRESH
+    bull_mask = y_fit > RISE_THRESH
+    bear_mask = y_fit < FALL_THRESH
     log_fn(f"  看漲種子：{bull_mask.sum():,}  看跌種子：{bear_mask.sum():,}")
 
     def calc_metrics(actual_pos: np.ndarray, pred_pos: np.ndarray,
@@ -483,11 +506,12 @@ def validate_features(df: pd.DataFrame, feat_cols: list, log_fn: callable) -> di
 
     metrics = {}
 
+    # 在驗證段評估；正例門檻與訓練種子一致 (RISE_THRESH / FALL_THRESH)
     if bull_mask.sum() >= 5:
         oc_bull = OneClassSVM(kernel='rbf', nu=OCSVM_NU, gamma='scale')
         oc_bull.fit(Z[bull_mask])
-        pred_pos = oc_bull.predict(Z) == 1
-        actual   = y > MIN_BULL_RET
+        pred_pos = oc_bull.predict(Z_val) == 1
+        actual   = y_val > RISE_THRESH
         metrics['bull'] = calc_metrics(actual, pred_pos, '看漲', log_fn)
     else:
         metrics['bull'] = {}
@@ -495,8 +519,8 @@ def validate_features(df: pd.DataFrame, feat_cols: list, log_fn: callable) -> di
     if bear_mask.sum() >= 5:
         oc_bear = OneClassSVM(kernel='rbf', nu=OCSVM_NU, gamma='scale')
         oc_bear.fit(Z[bear_mask])
-        pred_pos = oc_bear.predict(Z) == 1
-        actual   = y < MIN_BEAR_RET
+        pred_pos = oc_bear.predict(Z_val) == 1
+        actual   = y_val < FALL_THRESH
         metrics['bear'] = calc_metrics(actual, pred_pos, '看跌', log_fn)
     else:
         metrics['bear'] = {}
@@ -739,21 +763,14 @@ class KLineApp:
         try:
             if ticker not in self._raw_data:
                 self._log(f"  {ticker} 不在台灣50清單，補充下載...")
-                try:
-                    df_extra = yf.download(
-                        ticker, start='2015-01-01', end='2025-12-31',
-                        auto_adjust=False, progress=False, actions=False,
-                    )
-                    if isinstance(df_extra.columns, pd.MultiIndex):
-                        df_extra.columns = [col[0] for col in df_extra.columns]
-                    if df_extra.empty or len(df_extra) < 100:
-                        self._queue.put(('error', f"{ticker} 無法下載或資料不足，請確認代號是否正確"))
-                        return
-                    self._raw_data[ticker] = df_extra
-                    self._log(f"  {ticker} 下載完成：{len(df_extra)} 筆")
-                except Exception as e:
-                    self._queue.put(('error', f"{ticker} 下載失敗：{e}"))
+                _, df_extra = _download_one(ticker)
+                if df_extra is None:
+                    self._queue.put(('error',
+                        f"{ticker} 無法下載、資料不足或缺少必要欄位"
+                        f"（Open/High/Low/Close/Volume/Adj Close），請確認代號是否正確"))
                     return
+                self._raw_data[ticker] = df_extra
+                self._log(f"  {ticker} 下載完成：{len(df_extra)} 筆")
 
             results = {}
             total_sets = len(FEATURE_SETS)
