@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 
 from pip_algorithm import extract_pips
 from vg_graph import build_visibility_graph
@@ -47,6 +47,10 @@ class ChartGCNDataset(Dataset):
         indicator_n: int = None,    # None → 跟隨 window
         stride: int = 1,
         n_workers: int = None,      # None → auto (CPU cores - 1)
+        norm_stats: dict = None,    # {ticker: (mean, std)} — 測試集應傳入
+                                    # 訓練集的統計量, 避免前視偏誤 (C-3)
+        min_date=None,              # 只保留決策日 > min_date 的樣本;
+                                    # 搭配 warm-up 資料使用 (C-4)
         verbose: bool = True,
     ):
         self.window = window
@@ -54,77 +58,93 @@ class ChartGCNDataset(Dataset):
         self.N = N
         self.g = g
         self.indicator_n = indicator_n if indicator_n is not None else window
+        self.norm_stats = {}        # 本 dataset 使用的統計量 (可傳給測試集)
 
         if n_workers is None:
             n_workers = max(1, os.cpu_count() // 2)
+        if min_date is not None:
+            min_date = pd.to_datetime(min_date)
 
-        self.X_list = []
-        self.y_list = []
-        self.meta = []
-
-        # 先計算所有股票的指標和 task 清單
-        all_tasks = []
+        # ── Phase 1: 逐股計算指標, 只建「輕量描述子」(不複製資料切片) ──
+        # 記憶體改善: 舊版把每個樣本的 series/feats 切片複製進 task 清單
+        # (30 萬樣本 ≈ 2GB), 再 np.stack 又複製一次 → 大規模時 MemoryError。
+        # 新版描述子排序後預先配置整塊 X, 逐筆就地填入, 峰值僅一份 X。
+        close_by_tk = {}
+        feats_by_tk = {}
+        descriptors = []   # (ticker, start, end, label, decision_date)
         for ticker, df in stock_data.items():
             if len(df) < window + 1:
                 continue
-            feats = compute_indicators(df, n=self.indicator_n)
+            stats = norm_stats.get(ticker) if norm_stats else None
+            feats, used_stats = compute_indicators(
+                df, n=self.indicator_n, stats=stats, return_stats=True)
+            self.norm_stats[ticker] = used_stats
             close = df['close'].values
+            close_by_tk[ticker] = close
+            feats_by_tk[ticker] = feats
 
             for end in range(window, len(df) - 1, stride):
                 start = end - window
-                series = close[start:end].copy()
-                feat_window = feats[start:end].copy()
+                # 決策日 = window 最後一天 (end-1); label = 隔日相對決策日的漲跌
+                decision_date = df.index[end - 1]
+                if min_date is not None and decision_date <= min_date:
+                    continue
                 label = 1 if close[end] > close[end - 1] else 0
-                meta_key = (ticker, df.index[end])
+                descriptors.append((ticker, start, end, label, decision_date))
 
-                all_tasks.append(
-                    (series, feat_window, label, m_pips, N, g, meta_key)
-                )
+        # 依 (date, ticker) 排序 → 填入順序即最終順序, 免去事後重排複製
+        descriptors.sort(key=lambda d: (d[4], d[0]))
 
-        total = len(all_tasks)
+        total = len(descriptors)
+        F_dim = next(iter(feats_by_tk.values())).shape[1] if feats_by_tk else 9
         if verbose:
             print(f"  建構 {total} 個樣本 (workers={n_workers})...")
 
-        # 多進程並行建構
+        X_all = np.zeros((total, N, g, F_dim), dtype=np.float32)
+        y_all = np.zeros(total, dtype=np.int64)
+        self.meta = []
+        n_ok = 0
         done = 0
+
+        def _iter_tasks(desc_chunk):
+            for ticker, start, end, label, ddate in desc_chunk:
+                yield (close_by_tk[ticker][start:end],
+                       feats_by_tk[ticker][start:end],
+                       label, m_pips, N, g, (ticker, ddate))
+
         if n_workers > 1 and total > 50:
+            # 分塊送進 pool.map (保序), 記憶體以塊為上限
+            CHUNK = 2000
             with ProcessPoolExecutor(max_workers=n_workers) as pool:
-                futures = {pool.submit(_build_one_sample, t): i
-                           for i, t in enumerate(all_tasks)}
-                for future in as_completed(futures):
-                    result = future.result()
-                    done += 1
-                    if result is not None:
-                        X, label, meta_key = result
-                        self.X_list.append(X)
-                        self.y_list.append(label)
-                        self.meta.append(meta_key)
-                    if verbose and done % 500 == 0:
-                        print(f"    {done}/{total} ({done/total:.0%})")
+                for ci in range(0, total, CHUNK):
+                    chunk = descriptors[ci:ci + CHUNK]
+                    for result in pool.map(_build_one_sample,
+                                           _iter_tasks(chunk)):
+                        done += 1
+                        if result is not None:
+                            X, label, meta_key = result
+                            X_all[n_ok] = X
+                            y_all[n_ok] = label
+                            self.meta.append(meta_key)
+                            n_ok += 1
+                        if verbose and done % 5000 == 0:
+                            print(f"    {done}/{total} ({done/total:.0%})")
         else:
-            # 單線程 fallback
-            for task in all_tasks:
+            for task in _iter_tasks(descriptors):
                 result = _build_one_sample(task)
                 done += 1
                 if result is not None:
                     X, label, meta_key = result
-                    self.X_list.append(X)
-                    self.y_list.append(label)
+                    X_all[n_ok] = X
+                    y_all[n_ok] = label
                     self.meta.append(meta_key)
-                if verbose and done % 500 == 0:
+                    n_ok += 1
+                if verbose and done % 5000 == 0:
                     print(f"    {done}/{total} ({done/total:.0%})")
 
-        # 依 meta (ticker, date) 排序以確保 date_to_indices 正確
-        if self.X_list:
-            sorted_indices = sorted(range(len(self.meta)),
-                                    key=lambda i: (self.meta[i][1], self.meta[i][0]))
-            self.X_list = [self.X_list[i] for i in sorted_indices]
-            self.y_list = [self.y_list[i] for i in sorted_indices]
-            self.meta = [self.meta[i] for i in sorted_indices]
-
-        # 轉成 numpy
-        self.X = np.stack(self.X_list, axis=0) if self.X_list else np.zeros((0, N, g, 9))
-        self.y = np.array(self.y_list, dtype=np.int64) if self.y_list else np.zeros(0, dtype=np.int64)
+        # 截尾 view (失敗樣本極少; 不另複製)
+        self.X = X_all[:n_ok]
+        self.y = y_all[:n_ok]
 
         # 日期 → sample index 映射
         self.date_to_indices = {}
@@ -156,21 +176,30 @@ class ChartGCNDataset(Dataset):
         )
 
 
-def split_by_date(stock_data: dict, train_end: str, test_end: str = None):
-    """依日期切分 dict of DataFrames 成 (train_dict, test_dict)."""
+def split_by_date(stock_data: dict, train_end: str, test_end: str = None,
+                  warmup_rows: int = 0):
+    """
+    依日期切分 dict of DataFrames 成 (train_dict, test_dict).
+
+    warmup_rows: 測試段往前多帶的歷史列數 (供指標 rolling 與滑窗 warm-up,
+                 修正 C-4)。搭配 ChartGCNDataset(min_date=train_end) 使用,
+                 確保 warm-up 段不會產生測試樣本。
+    """
     train, test = {}, {}
     train_end = pd.to_datetime(train_end)
     test_end = pd.to_datetime(test_end) if test_end else None
 
     for tk, df in stock_data.items():
         train_part = df[df.index <= train_end]
+        pos = df.index.searchsorted(train_end, side='right')
+        start_pos = max(0, pos - warmup_rows)
         if test_end:
-            test_part = df[(df.index > train_end) & (df.index <= test_end)]
+            test_part = df.iloc[start_pos:][df.iloc[start_pos:].index <= test_end]
         else:
-            test_part = df[df.index > train_end]
+            test_part = df.iloc[start_pos:]
         if len(train_part) > 0:
             train[tk] = train_part
-        if len(test_part) > 0:
+        if len(test_part) > pos - start_pos:
             test[tk] = test_part
     return train, test
 

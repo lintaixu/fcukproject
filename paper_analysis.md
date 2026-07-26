@@ -74,17 +74,13 @@
 ## 三、模型架構層
 
 ### 6. Spatial Graph Convolution (GCN)
-**論文 Section 4.1, Eq.(5) | `model.py` GraphConvLayer**
+**論文 Section 3.2.3（2026-07-24 依原文 PDF 更正）**
 
 | 項目 | 內容 |
 |------|------|
-| 公式 | **H = σ(D⁻¹ Â X W + b)** |
-| Â (A-hat) | `Â = A + I`（加自環）|
-| D⁻¹ (度矩陣) | `D_ii = Σ_j Â_ij`，row normalization |
-| σ | ReLU 激活函數 |
-| 層數 | 2 層 GCN |
-| 輸入/輸出 | (B, N, g, F) → (B, N, g, F)，特徵維度不變 |
-| 引用 | 基於 DGCNN [22] 的 spatial graph convolution |
+| ⚠ 更正 | 論文**沒有** `H = σ(D⁻¹ Â X W + b)` 這類 GCN 傳播式(全文式 (1)~(11) 無此式)|
+| 論文的 "spatial GCN" | = 「正規化子圖(PATCHY-SAN 式排序 [22])+ LeNet 式卷積」整體,即 Eq.(6) `l = f_LeNet(X)` |
+| 鄰接矩陣用途 | 僅在子圖正規化階段使用(排序/補 dummy),不進入前向傳播 —— 與 `core/model.py` 現行實作一致 |
 
 ### 7. Conv1 — 子圖內卷積
 **論文 Section 4.2 | `model.py`**
@@ -95,7 +91,7 @@
 | 輸入 → 輸出 | (B×N, 1, g, F) → (B×N, k1, 1, 1) |
 | 意義 | 將每個子圖壓縮成 k1 維的「圖表模式特徵向量」 |
 | 激活 | ReLU |
-| k1 | 32 (filter 數) |
+| k1 | ⚠ 論文未給數值(「typical configuration」);paper_exact 實作採 LeNet 對應 k1=6(舊改進版為 32)|
 
 ### 8. Conv2 — 跨子圖卷積
 **論文 Section 4.2 | `model.py`**
@@ -106,18 +102,18 @@
 | 輸入 → 輸出 | (B, k1, N, 1) → (B, k2, N-4, 1) |
 | 意義 | 組合多個子圖的模式，捕捉「高階圖表型態」 |
 | 激活 | ReLU |
-| k2 | 32 |
+| k2 | ⚠ 論文未給數值;paper_exact 採 LeNet 對應 k2=16(舊改進版為 32)|
 
 ### 9. Conv3 — Channel Mixing
 **論文 Section 4.2 | `model.py`**
 
 | 項目 | 內容 |
 |------|------|
-| Kernel size | (1, 1) |
-| 輸入 → 輸出 | (B, k2, N-4, 1) → (B, k3, N-4, 1) |
-| 意義 | 跨 channel 混合特徵 |
+| Kernel size | paper_exact: (N-4, 1) 全高度(仿 LeNet C5);舊改進版: (1, 1) |
+| 輸入 → 輸出 | paper_exact: (B, k2, N-4, 1) → (B, k3, 1, 1) |
+| 意義 | 跨 channel/全高度混合特徵(論文只說「use k3 kernels」,kernel 形狀未明定)|
 | 激活 | ReLU |
-| k3 | 16 |
+| k3 | ⚠ 論文未給數值;paper_exact 採 LeNet 對應 k3=120(舊改進版為 16)|
 
 ### 10. Fully Connected Layers
 **論文 Section 4.2 | `model.py`**
@@ -133,11 +129,11 @@
 
 | 公式 | 表達式 | 說明 |
 |------|--------|------|
-| **Eq.(7)** | `Score = (W_q × l) × (W_k × l)ᵀ / √k_a` | Scaled dot-product attention，Q=W_q×l, K=W_k×l |
-| **Eq.(8)** | `α = softmax(Score)` | 注意力權重，dim=-1 |
-| **Eq.(9)** | `V_a = α × (W_v × l)` | 加權聚合 value，V=W_v×l |
-| 超參數 | k_a (query/key 維度), k_v (value 維度) | k_a=16, k_v=16 (獨立) |
-| 作用域 | **同一天的 S 檔股票互相 attend** | 捕捉跨股票的市場結構 |
+| **Eq.(7)** | `Q = l·W_Q, K = l·W_K, V = l·W_V` | 三個投影,W_Q/W_K ∈ R^(F2×ka), W_V ∈ R^(F2×kv) |
+| **Eq.(8)** | `S = Q·Kᵀ` | ⚠ 原文**無 /√k_a 縮放**(2026-07-24 依 PDF 更正)|
+| **Eq.(9)** | `α = softmax(S)`,之後 `V_a = α·V` | 注意力權重與加權聚合 |
+| 超參數 | k_a, k_v | ⚠ 論文**未給數值**(只說 ka 供 Q/K 共用、kv 可不同);16/16 是我們的假設 |
+| 作用域 | 「between **S samples**」 | ⚠ 論文**未定義 S 是誰**;「同一天的 S 檔股票」是我們(合理且無洩漏)的解讀,「連續 128 筆 batch」解讀會造成未來洩漏(見 實驗記錄_論文對齊.md P1) |
 
 ### 12. Classifier
 **論文 Section 4.3 | `model.py`**

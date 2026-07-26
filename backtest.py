@@ -35,22 +35,29 @@ def compute_macd_signal(close: pd.Series, n: int = 100):
     return diff.ewm(span=n, adjust=False).mean()
 
 
-def get_per_stock_predictions(model, test_ds, device='cpu'):
+def get_per_stock_predictions(model, test_ds, device='cpu',
+                              batch_mode='paper', batch_size=128):
     """
-    使用 DateGroupedBatchSampler 批次推論 (對齊 Self-Attention 語意).
-    同一天的所有股票一起送入模型, 讓 attention 跨股票計算.
+    批次推論. batch_mode 應與訓練時一致 (attention 跨同批樣本):
+      - 'paper': 依 dataset 順序 (已按日期排序) 固定 128 筆一批 (論文設定)
+      - 'date':  DateGroupedBatchSampler, 同日股票同批
 
     Returns:
         dict: {ticker: [(date, pred_label), ...]}
     """
     model.eval()
 
-    # 使用 DateGroupedBatchSampler 確保同日推論
-    sampler = DateGroupedBatchSampler(test_ds, shuffle=False)
+    if batch_mode == 'paper':
+        n = len(test_ds)
+        batches = [list(range(i, min(i + batch_size, n)))
+                   for i in range(0, n, batch_size)]
+    else:
+        batches = list(DateGroupedBatchSampler(test_ds, shuffle=False))
+
     all_preds = np.zeros(len(test_ds), dtype=np.int64)
 
     with torch.no_grad():
-        for indices in sampler:
+        for indices in batches:
             X_batch = torch.from_numpy(test_ds.X[indices]).float().to(device)
             logits = model(X_batch)
             preds = logits.argmax(1).cpu().numpy()
@@ -126,34 +133,35 @@ def simulate_one_stock(
 
 
 def compute_benchmark(stock_data: dict, test_dates: list):
-    """Benchmark: 等權持有所有股票 (buy-and-hold)."""
-    all_returns = []
+    """Benchmark: 等權持有所有股票 (buy-and-hold), 按日期對齊."""
+    series_list = []
     for tk, df in stock_data.items():
         close = df['close']
         available = [d for d in test_dates if d in close.index]
         if len(available) < 2:
             continue
         start_price = close.loc[available[0]]
-        nv = [close.loc[d] / start_price for d in available]
-        all_returns.append(nv)
+        series_list.append(close.loc[available] / start_price)
 
-    if not all_returns:
+    if not series_list:
         return test_dates, [1.0] * len(test_dates)
 
-    min_len = min(len(r) for r in all_returns)
-    avg_nv = np.mean([r[:min_len] for r in all_returns], axis=0)
-    return test_dates[:min_len], avg_nv.tolist()
+    # 以日期為軸對齊各股票淨值 (缺日 ffill), 逐日平均
+    nv_df = pd.concat(series_list, axis=1).sort_index().ffill()
+    avg = nv_df.mean(axis=1)
+    return list(avg.index), avg.tolist()
 
 
 def run_backtest(model, test_ds, stock_data, indicator_n=100,
-                 device='cpu', verbose=True):
-    """完整交易模擬流程."""
+                 device='cpu', verbose=True, batch_mode='paper'):
+    """完整交易模擬流程. batch_mode 必須與訓練/評估協定一致."""
     if verbose:
         print("\n" + "=" * 60)
         print("交易模擬 (對應論文 Section 6.3)")
         print("=" * 60)
 
-    predictions = get_per_stock_predictions(model, test_ds, device)
+    predictions = get_per_stock_predictions(model, test_ds, device,
+                                            batch_mode=batch_mode)
 
     if verbose:
         print(f"\n共 {len(predictions)} 檔股票有預測結果")
@@ -167,11 +175,14 @@ def run_backtest(model, test_ds, stock_data, indicator_n=100,
         stock_results.append(result)
 
     if stock_results:
-        min_len = min(len(r['net_values']) for r in stock_results)
-        avg_nv = np.mean(
-            [r['net_values'][:min_len] for r in stock_results], axis=0
-        )
-        avg_final = avg_nv[-1]
+        # C-7 修正: 以日期為軸對齊各股票淨值 (缺日 ffill), 逐日平均
+        nv_df = pd.concat(
+            {r['ticker']: pd.Series(r['net_values'], index=r['dates'])
+             for r in stock_results}, axis=1,
+        ).sort_index().ffill()
+        avg_series = nv_df.mean(axis=1)
+        avg_nv = avg_series.values
+        avg_final = float(avg_nv[-1])
     else:
         avg_final = 1.0
         avg_nv = [1.0]

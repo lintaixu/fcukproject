@@ -1,0 +1,58 @@
+{
+  "exp_id": "EXP-20260726-044414_scale-date-n500",
+  "datetime": "2026-07-26T05:44:58",
+  "params": {
+    "tickers": "tw500",
+    "n_stocks": 500,
+    "start": "2016-01-01",
+    "train_end": "2023-12-31",
+    "end": "2024-12-31",
+    "window": 140,
+    "m_pips": 80,
+    "N": 10,
+    "g": 4,
+    "epochs": 30,
+    "lr": 0.001,
+    "stride": 1,
+    "batch_mode": "date",
+    "seed": 42,
+    "workers": 1,
+    "no_backtest": false,
+    "raw_features": true,
+    "no_attention": false,
+    "out_dir": "experiments_paper",
+    "md_file": "實驗記錄_論文對齊.md",
+    "tag": "scale-date-n500"
+  },
+  "n_stocks": 500,
+  "n_train_samples": 885162,
+  "n_test_samples": 119125,
+  "train_pos_pct": 44.4,
+  "test_pos_pct": 43.92,
+  "metrics": {
+    "acc": 0.5609,
+    "pre_1": 1.0,
+    "pre_0": 0.5609,
+    "rec_1": 0.0,
+    "rec_0": 1.0,
+    "f1_1": 0.0,
+    "f1_0": 0.7186,
+    "val_f1_macro": 0.4153
+  },
+  "f1_macro": 0.3593,
+  "paper_ref_sz50": {
+    "acc": 69.26,
+    "pre_1": 65.76,
+    "pre_0": 72.26,
+    "f1_1": 66.4,
+    "f1_0": 71.67
+  },
+  "acc_gap_vs_paper": -13.17,
+  "backtest": {
+    "strategy_nv": 1.0001991924990283,
+    "benchmark_nv": 1.087792141948768,
+    "excess_pct": -8.759294944973961
+  },
+  "build_time_s": 2924.5,
+  "train_time_s": 716.2
+}

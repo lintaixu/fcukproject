@@ -1,0 +1,56 @@
+{
+  "exp_id": "EXP-20260721-133633_scale125",
+  "datetime": "2026-07-21T13:49:33",
+  "params": {
+    "tickers": "tw200",
+    "n_stocks": 125,
+    "start": "2016-01-01",
+    "train_end": "2023-12-31",
+    "end": "2024-12-31",
+    "window": 140,
+    "m_pips": 60,
+    "N": 15,
+    "g": 5,
+    "epochs": 30,
+    "lr": 0.001,
+    "stride": 1,
+    "batch_mode": "paper",
+    "seed": 42,
+    "workers": 1,
+    "no_backtest": false,
+    "raw_features": true,
+    "no_attention": false,
+    "tag": "scale125"
+  },
+  "n_stocks": 120,
+  "n_train_samples": 214946,
+  "n_test_samples": 28680,
+  "train_pos_pct": 47.0,
+  "test_pos_pct": 45.76,
+  "metrics": {
+    "acc": 0.484,
+    "pre_1": 0.4402,
+    "pre_0": 0.5258,
+    "rec_1": 0.4702,
+    "rec_0": 0.4956,
+    "f1_1": 0.4547,
+    "f1_0": 0.5103,
+    "val_f1_macro": 0.464
+  },
+  "f1_macro": 0.4825,
+  "paper_ref_sz50": {
+    "acc": 69.26,
+    "pre_1": 65.76,
+    "pre_0": 72.26,
+    "f1_1": 66.4,
+    "f1_0": 71.67
+  },
+  "acc_gap_vs_paper": -20.86,
+  "backtest": {
+    "strategy_nv": 0.9332388338332197,
+    "benchmark_nv": 1.0864329430255149,
+    "excess_pct": -15.319410919229515
+  },
+  "build_time_s": 513.9,
+  "train_time_s": 250.8
+}

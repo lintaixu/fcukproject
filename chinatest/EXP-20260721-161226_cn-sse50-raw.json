@@ -1,0 +1,58 @@
+{
+  "exp_id": "EXP-20260721-161226_cn-sse50-raw",
+  "datetime": "2026-07-21T16:17:33",
+  "params": {
+    "tickers": "sse50",
+    "n_stocks": 0,
+    "start": "2010-01-01",
+    "train_end": "2017-12-31",
+    "end": "2018-12-31",
+    "window": 140,
+    "m_pips": 60,
+    "N": 15,
+    "g": 5,
+    "epochs": 30,
+    "lr": 0.001,
+    "stride": 1,
+    "batch_mode": "paper",
+    "seed": 42,
+    "workers": 1,
+    "no_backtest": false,
+    "raw_features": true,
+    "no_attention": false,
+    "out_dir": "chinatest",
+    "md_file": "chinatest/實驗記錄_china.md",
+    "tag": "cn-sse50-raw"
+  },
+  "n_stocks": 49,
+  "n_train_samples": 79935,
+  "n_test_samples": 11809,
+  "train_pos_pct": 46.67,
+  "test_pos_pct": 45.82,
+  "metrics": {
+    "acc": 0.5224,
+    "pre_1": 0.4453,
+    "pre_0": 0.539,
+    "rec_1": 0.1724,
+    "rec_0": 0.8184,
+    "f1_1": 0.2486,
+    "f1_0": 0.65,
+    "val_f1_macro": 0.453
+  },
+  "f1_macro": 0.4493,
+  "paper_ref_sz50": {
+    "acc": 69.26,
+    "pre_1": 65.76,
+    "pre_0": 72.26,
+    "f1_1": 66.4,
+    "f1_0": 71.67
+  },
+  "acc_gap_vs_paper": -17.02,
+  "backtest": {
+    "strategy_nv": 1.0035663346697856,
+    "benchmark_nv": 0.8222074753941976,
+    "excess_pct": 18.135885927558803
+  },
+  "build_time_s": 202.5,
+  "train_time_s": 71.2
+}

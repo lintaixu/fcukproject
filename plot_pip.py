@@ -106,7 +106,8 @@ def main():
         col = i % sub_cols
         ax = fig.add_subplot(gs[row, col])
 
-        sub_nodes = bfs_subgraph(G, root, args.g)
+        # bfs_subgraph 回傳 (node_id, depth) tuple 清單, 取 node_id
+        sub_nodes = [n for n, _d in bfs_subgraph(G, root, args.g)]
         color = COLORS[i % len(COLORS)]
 
         # 背景: 完整收盤價

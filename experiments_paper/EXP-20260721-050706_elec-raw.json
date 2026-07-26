@@ -1,0 +1,56 @@
+{
+  "exp_id": "EXP-20260721-050706_elec-raw",
+  "datetime": "2026-07-21T05:11:34",
+  "params": {
+    "tickers": "electronics",
+    "n_stocks": 0,
+    "start": "2016-01-01",
+    "train_end": "2023-12-31",
+    "end": "2024-12-31",
+    "window": 140,
+    "m_pips": 60,
+    "N": 15,
+    "g": 5,
+    "epochs": 30,
+    "lr": 0.001,
+    "stride": 1,
+    "batch_mode": "paper",
+    "seed": 42,
+    "workers": 1,
+    "no_backtest": false,
+    "raw_features": true,
+    "no_attention": false,
+    "tag": "elec-raw"
+  },
+  "n_stocks": 44,
+  "n_train_samples": 77767,
+  "n_test_samples": 10516,
+  "train_pos_pct": 48.07,
+  "test_pos_pct": 46.66,
+  "metrics": {
+    "acc": 0.5023,
+    "pre_1": 0.4695,
+    "pre_0": 0.5363,
+    "rec_1": 0.5125,
+    "rec_0": 0.4933,
+    "f1_1": 0.4901,
+    "f1_0": 0.5139,
+    "val_f1_macro": 0.4911
+  },
+  "f1_macro": 0.502,
+  "paper_ref_sz50": {
+    "acc": 69.26,
+    "pre_1": 65.76,
+    "pre_0": 72.26,
+    "f1_1": 66.4,
+    "f1_0": 71.67
+  },
+  "acc_gap_vs_paper": -19.03,
+  "backtest": {
+    "strategy_nv": 1.060334638982159,
+    "benchmark_nv": 1.1533196744299643,
+    "excess_pct": -9.298503544780523
+  },
+  "build_time_s": 189.4,
+  "train_time_s": 75.1
+}

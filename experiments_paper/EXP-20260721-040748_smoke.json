@@ -1,0 +1,54 @@
+{
+  "exp_id": "EXP-20260721-040748_smoke",
+  "datetime": "2026-07-21T04:07:55",
+  "params": {
+    "tickers": "tw50",
+    "n_stocks": 3,
+    "start": "2022-01-01",
+    "train_end": "2023-12-31",
+    "end": "2024-12-31",
+    "window": 140,
+    "m_pips": 60,
+    "N": 15,
+    "g": 5,
+    "epochs": 2,
+    "lr": 0.001,
+    "stride": 1,
+    "batch_mode": "paper",
+    "seed": 42,
+    "workers": 1,
+    "no_backtest": false,
+    "tag": "smoke"
+  },
+  "n_stocks": 3,
+  "n_train_samples": 1032,
+  "n_test_samples": 717,
+  "train_pos_pct": 44.86,
+  "test_pos_pct": 50.07,
+  "metrics": {
+    "acc": 0.4951,
+    "pre_1": 0.4974,
+    "pre_0": 0.4853,
+    "rec_1": 0.805,
+    "rec_0": 0.1844,
+    "f1_1": 0.6149,
+    "f1_0": 0.2672,
+    "val_f1_macro": 0.4944
+  },
+  "f1_macro": 0.4411,
+  "paper_ref_sz50": {
+    "acc": 69.26,
+    "pre_1": 65.76,
+    "pre_0": 72.26,
+    "f1_1": 66.4,
+    "f1_0": 71.67
+  },
+  "acc_gap_vs_paper": -19.75,
+  "backtest": {
+    "strategy_nv": 1.481469619814151,
+    "benchmark_nv": 1.7369681454108568,
+    "excess_pct": -25.549852559670573
+  },
+  "build_time_s": 3.8,
+  "train_time_s": 1.6
+}

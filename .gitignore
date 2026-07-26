@@ -9,3 +9,7 @@ make_comparison_ppt.py
 trend_signal.py
 Chart GCN Learning chart information with a graph convolutional network for stock movement prediction.pdf
 特徵對比實驗*.pptx
+
+experiments_paper/dscache/
+chinatest/dscache/
+*.npz

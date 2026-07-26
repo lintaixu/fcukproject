@@ -91,7 +91,7 @@ items = [
     ("Chart GCN 模型實作", "對齊論文 Li et al., KBS 2022"),
     ("資料來源", "台股前 100 大 (實際取得 95 檔)，2018-2024"),
     ("Pipeline", "PIP 提取 → Visibility Graph → 子圖選取 → CNN + Self-Attention"),
-    ("特徵工程", "9 維技術指標 (SMA, EMA, RSI, MACD, Bollinger, OBV, ATR, Williams %R, Stochastic)"),
+    ("特徵工程", "9 維技術指標 (SMA, WMA, Momentum, MACD, Williams %R, CCI, K%, D%, RSI)"),
     ("模型改進", "加入 BatchNorm、Residual Attention、macro F1 選模"),
     ("Grid Search", "兩階段搜尋 32 組超參數，最佳: window=130, m_pips=80, N=15, g=5"),
     ("訓練設定", "window=130, m_pips=80, N=15, g=5, epochs=30"),

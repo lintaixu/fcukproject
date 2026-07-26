@@ -1,0 +1,56 @@
+{
+  "exp_id": "EXP-20260721-051137_fin-raw",
+  "datetime": "2026-07-21T05:13:13",
+  "params": {
+    "tickers": "finance",
+    "n_stocks": 0,
+    "start": "2016-01-01",
+    "train_end": "2023-12-31",
+    "end": "2024-12-31",
+    "window": 140,
+    "m_pips": 60,
+    "N": 15,
+    "g": 5,
+    "epochs": 30,
+    "lr": 0.001,
+    "stride": 1,
+    "batch_mode": "paper",
+    "seed": 42,
+    "workers": 1,
+    "no_backtest": false,
+    "raw_features": true,
+    "no_attention": false,
+    "tag": "fin-raw"
+  },
+  "n_stocks": 15,
+  "n_train_samples": 27074,
+  "n_test_samples": 3585,
+  "train_pos_pct": 46.41,
+  "test_pos_pct": 47.48,
+  "metrics": {
+    "acc": 0.5124,
+    "pre_1": 0.4876,
+    "pre_0": 0.539,
+    "rec_1": 0.5311,
+    "rec_0": 0.4955,
+    "f1_1": 0.5084,
+    "f1_0": 0.5163,
+    "val_f1_macro": 0.5096
+  },
+  "f1_macro": 0.5124,
+  "paper_ref_sz50": {
+    "acc": 69.26,
+    "pre_1": 65.76,
+    "pre_0": 72.26,
+    "f1_1": 66.4,
+    "f1_0": 71.67
+  },
+  "acc_gap_vs_paper": -18.02,
+  "backtest": {
+    "strategy_nv": 1.106093446552489,
+    "benchmark_nv": 1.181371267464311,
+    "excess_pct": -7.527782091182211
+  },
+  "build_time_s": 67.1,
+  "train_time_s": 27.3
+}

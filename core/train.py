@@ -1,9 +1,11 @@
 """
 Training & Evaluation — 嚴格對齊論文 (Li et al., KBS 2022).
 
-變更:
-  - 模型只接收 X, 不接收 A (移除 GCN 層後不需要 adjacency)
-  - DateGroupedBatchSampler 保留 (對齊論文 Self-Attention 設計)
+batch_mode:
+  - 'paper': 隨機批次 batch_size=128 (論文 4.3: "the batch size = 128";
+             Self-Attention 的 S 樣本 = 同批 128 個隨機樣本) — 預設
+  - 'date':  DateGroupedBatchSampler, 同一交易日的股票同批
+             (自訂解讀: 讓 attention 跨同日股票; 論文未如此描述)
 """
 import numpy as np
 import torch
@@ -101,36 +103,45 @@ def fit(
     *,
     N=15, g=5, F_dim=9,
     epochs=30,
-    batch_size=64,
     lr=1e-3,
     weight_decay=5e-5,
     dropout=0.3,
+    batch_mode="paper",     # 'paper' = 隨機批次 128 (論文) / 'date' = 同日同批
+    batch_size=128,         # 論文 4.3: batch size = 128 (僅 batch_mode='paper')
+    paper_exact=True,       # True = 論文原始架構 (無 BN/Dropout/殘差)
+    use_attention=True,     # False = 論文消融變體 Chart GCN-2 (無 self-attention)
     device=None,
     verbose=True,
 ):
-    # 預設 CPU — 模型僅 26K 參數，GPU 優勢極小，且避免螢幕黑屏
+    # 預設 CPU — 模型僅數萬參數，GPU 優勢極小，且避免螢幕黑屏
     if device is None:
         device = "cpu"
     if verbose:
-        print(f"[INFO] device = {device}")
+        print(f"[INFO] device = {device}, batch_mode = {batch_mode}, "
+              f"paper_exact = {paper_exact}")
 
-    # DateGroupedBatchSampler
-    train_sampler = DateGroupedBatchSampler(train_ds, shuffle=True)
-    train_loader = DataLoader(train_ds, batch_sampler=train_sampler)
+    if batch_mode == "paper":
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    elif batch_mode == "date":
+        train_sampler = DateGroupedBatchSampler(train_ds, shuffle=True)
+        train_loader = DataLoader(train_ds, batch_sampler=train_sampler)
+        val_sampler = DateGroupedBatchSampler(val_ds, shuffle=False)
+        val_loader = DataLoader(val_ds, batch_sampler=val_sampler)
+        test_sampler = DateGroupedBatchSampler(test_ds, shuffle=False)
+        test_loader = DataLoader(test_ds, batch_sampler=test_sampler)
+        if verbose:
+            print(f"[INFO] DateGroupedBatchSampler: "
+                  f"train={len(train_sampler)} dates, "
+                  f"val={len(val_sampler)} dates, "
+                  f"test={len(test_sampler)} dates")
+    else:
+        raise ValueError(f"unknown batch_mode: {batch_mode}")
 
-    val_sampler = DateGroupedBatchSampler(val_ds, shuffle=False)
-    val_loader = DataLoader(val_ds, batch_sampler=val_sampler)
-
-    test_sampler = DateGroupedBatchSampler(test_ds, shuffle=False)
-    test_loader = DataLoader(test_ds, batch_sampler=test_sampler)
-
-    if verbose:
-        print(f"[INFO] DateGroupedBatchSampler: "
-              f"train={len(train_sampler)} dates, "
-              f"val={len(val_sampler)} dates, "
-              f"test={len(test_sampler)} dates")
-
-    model = ChartGCN(N=N, g=g, F_dim=F_dim, dropout=dropout).to(device)
+    model = ChartGCN(N=N, g=g, F_dim=F_dim, dropout=dropout,
+                     paper_exact=paper_exact,
+                     use_attention=use_attention).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     criterion = nn.CrossEntropyLoss()
 
@@ -159,6 +170,8 @@ def fit(
     if best_state is not None:
         model.load_state_dict(best_state)
     test_metrics = evaluate(model, test_loader, device)
+    # 供上層 (如 grid search) 以驗證分數選參, 避免測試集洩漏
+    test_metrics['val_f1_macro'] = best_val_score
 
     if verbose:
         print("\n=== Test Metrics ===")

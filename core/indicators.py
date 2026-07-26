@@ -15,14 +15,19 @@ import numpy as np
 import pandas as pd
 
 
-def compute_indicators(df: pd.DataFrame, n: int = 100) -> np.ndarray:
+def compute_indicators(df: pd.DataFrame, n: int = 100,
+                       stats: tuple = None, return_stats: bool = False):
     """
     Args:
-        df:  DataFrame with columns ['open', 'high', 'low', 'close']
-        n:   時間窗口 (論文 grid search: {100, 120, 130, 140})
+        df:    DataFrame with columns ['open', 'high', 'low', 'close']
+        n:     時間窗口 (論文 grid search: {100, 120, 130, 140})
+        stats: (mean, std) — 若提供則用它做 z-score (應來自訓練期,
+               避免前視偏誤); None 則用本 df 自身統計量
+        return_stats: True 時回傳 (feats, (mean, std)) 供測試集重用
 
     Returns:
         np.ndarray of shape (T, 9), z-score normalized
+        (或 (feats, stats) 若 return_stats=True)
     """
     close = df['close'].astype(float)
     high = df['high'].astype(float)
@@ -81,12 +86,17 @@ def compute_indicators(df: pd.DataFrame, n: int = 100) -> np.ndarray:
     # fill NaN / inf
     feats = np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # z-score per column
-    mean = feats.mean(axis=0, keepdims=True)
-    std = feats.std(axis=0, keepdims=True) + 1e-9
-    feats = (feats - mean) / std
+    # z-score per column — 統計量可外部注入 (訓練期), 避免前視偏誤
+    if stats is None:
+        mean = feats.mean(axis=0, keepdims=True)
+        std = feats.std(axis=0, keepdims=True) + 1e-9
+    else:
+        mean, std = stats
+    feats = ((feats - mean) / std).astype(np.float32)
 
-    return feats.astype(np.float32)
+    if return_stats:
+        return feats, (mean, std)
+    return feats
 
 
 if __name__ == "__main__":

@@ -1,16 +1,14 @@
 """
 Subgraph Generation & Normalization — 嚴格對齊論文 (Li et al., KBS 2022).
 
-論文 Section 3.2.1–3.2.2:
-  1. 核心節點選取: 依 chart importance score 排序, 選前 N 個
-  2. BFS 展開: 以核心節點為起點, BFS 收集 g 個節點
+論文 Section 3.2.1–3.2.2 (依循 PATCHY-SAN, Niepert et al. ICML 2016 [22]):
+  1. 核心節點選取: 依 chart importance score 排序, 同分依 degree,
+     再同分依「鄰居平均 importance score」, 選前 N 個
+  2. BFS 展開: 以核心節點為起點, 「整層」擴展直到節點數 >= g
+     (論文: "If the size of the current depth subgraph is insufficient,
+      we expand one layer to add more nodes")
   3. 正規化排序: 先按 BFS 深度, 同深度按 importance score, 同分按 degree
-  4. Padding: 節點 < g 補 dummy node; 節點 > g 過濾該子圖
-
-與舊版差異:
-  - 選取改為純 importance score (舊版用三層 key)
-  - 正規化改為 BFS 深度分層排序 (舊版全域排序)
-  - 超標子圖改為過濾 (舊版截斷)
+  4. 節點 > g: 依上述排序取前 g 個 (truncate); 節點 < g: 補 dummy node
 """
 from collections import deque
 import numpy as np
@@ -19,8 +17,8 @@ import networkx as nx
 
 def select_top_nodes(G: nx.Graph, scores: np.ndarray, N: int):
     """
-    論文: "we sort nodes by their chart importance score"
-    依 importance score 降序, 同分依 degree 降序, 選前 N 個.
+    論文 3.2.1: importance score 降序 → 同分依 degree 降序
+    → 再同分依鄰居平均 importance score 降序, 選前 N 個.
     """
     nodes = list(G.nodes())
 
@@ -28,7 +26,9 @@ def select_top_nodes(G: nx.Graph, scores: np.ndarray, N: int):
         time_idx = G.nodes[node]['time']
         own_score = scores[time_idx]
         deg = G.degree(node)
-        return (-own_score, -deg)
+        nb_scores = [scores[G.nodes[nb]['time']] for nb in G.neighbors(node)]
+        nb_mean = np.mean(nb_scores) if nb_scores else 0.0
+        return (-own_score, -deg, -nb_mean)
 
     nodes_sorted = sorted(nodes, key=sort_key)
     return nodes_sorted[:N]
@@ -36,24 +36,28 @@ def select_top_nodes(G: nx.Graph, scores: np.ndarray, N: int):
 
 def bfs_subgraph(G: nx.Graph, root: int, g: int):
     """
-    BFS 從 root 展開, 收集 g 個節點, 同時記錄每個節點的 BFS 深度.
+    BFS 從 root 逐層展開: 每次加入「一整層」節點, 直到總數 >= g
+    或無節點可加 (論文 3.2.1 / PATCHY-SAN neighborhood assembly).
+    候選數可能 > g, 由 normalize_subgraph 的排序決定最終留下哪 g 個.
 
     Returns:
         List[(node_id, depth)]
     """
     visited = [(root, 0)]
     visited_set = {root}
-    queue = deque([(root, 0)])
+    frontier = [root]
+    depth = 0
 
-    while queue and len(visited) < g:
-        node, depth = queue.popleft()
-        for nb in G.neighbors(node):
-            if nb not in visited_set:
-                visited.append((nb, depth + 1))
-                visited_set.add(nb)
-                queue.append((nb, depth + 1))
-                if len(visited) >= g:
-                    break
+    while len(visited) < g and frontier:
+        depth += 1
+        next_frontier = []
+        for node in frontier:
+            for nb in G.neighbors(node):
+                if nb not in visited_set:
+                    visited_set.add(nb)
+                    next_frontier.append(nb)
+        visited.extend((nb, depth) for nb in next_frontier)
+        frontier = next_frontier
     return visited
 
 
@@ -65,28 +69,26 @@ def normalize_subgraph(
 ):
     """
     論文正規化排序 (Section 3.2.2):
-      1. BFS 深度 (升序 — 靠近 root 排前面)
+      1. BFS 深度 (升序 — root 排最前)
       2. 同深度: chart importance score (降序)
       3. 同分: node degree (降序)
-      4. 節點 < g: 補 dummy node (-1)
+      4. 節點 > g: 依排序取前 g 個 (truncate — PATCHY-SAN 作法,
+         對應論文 "filter out the subgraphs whose number of nodes
+         is more than G")
+      5. 節點 < g: 補 dummy node (-1), 特徵為 0 (論文: "add dummy nodes
+         that have no connection with any points")
 
     Returns:
         ordered_nodes: List[int] (長度 g), -1 = dummy
-        adj:           np.ndarray (g, g)
-        valid:         bool — 若原始節點 > g 則為 False (論文: filter out)
+        adj:           np.ndarray (g, g) — 供分析用; 論文模型無顯式 GCN 層,
+                       訓練時不使用此矩陣
     """
-    # 過濾: 若 BFS 可達節點超過 g 且我們只取了 g 個, 不需過濾
-    # 但若原圖連通分量 > g 且 root 可達全部, 標記不佳
-    # 實務上 BFS 已限制到 g 個, 直接使用
-
-    sub_set = set(nd[0] for nd in sub_nodes_with_depth)
 
     def sort_key(item):
         node, depth = item
         time_idx = G.nodes[node]['time']
         importance = scores[time_idx]
-        deg_in_sub = sum(1 for nb in G.neighbors(node) if nb in sub_set)
-        return (depth, -importance, -deg_in_sub)
+        return (depth, -importance, -G.degree(node))
 
     ordered_items = sorted(sub_nodes_with_depth, key=sort_key)
     ordered_nodes = [item[0] for item in ordered_items]

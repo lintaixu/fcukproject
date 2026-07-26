@@ -1,0 +1,141 @@
+
+============================================================
+ [V1] 修正版 Chart-GCN 基準線: F=9 指標, 預測隔日漲跌
+============================================================
+  train=33630 val=7170 test=7080 (test 漲比例=45.90%)
+  Ep01 loss=0.7146 tr_acc=0.5103 val_acc=0.5241 val_f1m=0.3539
+  Ep02 loss=0.6931 tr_acc=0.5238 val_acc=0.5255 val_f1m=0.3445
+  Ep03 loss=0.6925 tr_acc=0.5282 val_acc=0.5252 val_f1m=0.3446
+  Ep04 loss=0.6923 tr_acc=0.5314 val_acc=0.5255 val_f1m=0.3445
+  Ep05 loss=0.6920 tr_acc=0.5310 val_acc=0.5257 val_f1m=0.3451
+  Ep06 loss=0.6919 tr_acc=0.5308 val_acc=0.5255 val_f1m=0.3445
+  Ep07 loss=0.6922 tr_acc=0.5294 val_acc=0.5255 val_f1m=0.3445
+  Ep08 loss=0.6912 tr_acc=0.5318 val_acc=0.5255 val_f1m=0.3508
+  Ep09 loss=0.6919 tr_acc=0.5310 val_acc=0.5255 val_f1m=0.3445
+  Ep10 loss=0.6917 tr_acc=0.5291 val_acc=0.5255 val_f1m=0.3445
+  Ep11 loss=0.6912 tr_acc=0.5326 val_acc=0.5255 val_f1m=0.3445
+  Ep12 loss=0.6908 tr_acc=0.5316 val_acc=0.5257 val_f1m=0.3451
+  Ep13 loss=0.6909 tr_acc=0.5326 val_acc=0.5258 val_f1m=0.3451
+  Ep14 loss=0.6912 tr_acc=0.5319 val_acc=0.5243 val_f1m=0.3565
+  Ep15 loss=0.6904 tr_acc=0.5328 val_acc=0.5255 val_f1m=0.3445
+  Ep16 loss=0.6905 tr_acc=0.5353 val_acc=0.5248 val_f1m=0.3489
+  Ep17 loss=0.6904 tr_acc=0.5359 val_acc=0.5258 val_f1m=0.3459
+  Ep18 loss=0.6895 tr_acc=0.5412 val_acc=0.5261 val_f1m=0.3525
+  Ep19 loss=0.6889 tr_acc=0.5418 val_acc=0.5248 val_f1m=0.3585
+  Ep20 loss=0.6879 tr_acc=0.5464 val_acc=0.5192 val_f1m=0.3732
+  → test acc=0.5388 f1_macro=0.3683 (1.2 min)
+
+============================================================
+ [V2] F=9 指標, 標籤改為未來 5 日漲跌 (與系統 A 對齊)
+============================================================
+  train=33630 val=7170 test=7080 (test 漲比例=51.75%)
+  Ep01 loss=0.7103 tr_acc=0.5191 val_acc=0.5335 val_f1m=0.3677
+  Ep02 loss=0.6902 tr_acc=0.5357 val_acc=0.5088 val_f1m=0.4898
+  Ep03 loss=0.6867 tr_acc=0.5466 val_acc=0.5699 val_f1m=0.5085
+  Ep04 loss=0.6750 tr_acc=0.5818 val_acc=0.5693 val_f1m=0.4989
+  Ep05 loss=0.6587 tr_acc=0.6168 val_acc=0.5672 val_f1m=0.5119
+  Ep06 loss=0.6394 tr_acc=0.6391 val_acc=0.5660 val_f1m=0.4888
+  Ep07 loss=0.6189 tr_acc=0.6595 val_acc=0.5356 val_f1m=0.5133
+  Ep08 loss=0.5983 tr_acc=0.6817 val_acc=0.5353 val_f1m=0.3916
+  Ep09 loss=0.5789 tr_acc=0.6967 val_acc=0.5043 val_f1m=0.4918
+  Ep10 loss=0.5668 tr_acc=0.7070 val_acc=0.5403 val_f1m=0.4424
+  Ep11 loss=0.5572 tr_acc=0.7194 val_acc=0.5289 val_f1m=0.5279
+  Ep12 loss=0.5406 tr_acc=0.7285 val_acc=0.5385 val_f1m=0.5133
+  Ep13 loss=0.5338 tr_acc=0.7332 val_acc=0.5455 val_f1m=0.4806
+  Ep14 loss=0.5303 tr_acc=0.7360 val_acc=0.5301 val_f1m=0.5154
+  Ep15 loss=0.5187 tr_acc=0.7425 val_acc=0.5492 val_f1m=0.4782
+  Ep16 loss=0.5097 tr_acc=0.7502 val_acc=0.5503 val_f1m=0.5158
+  Ep17 loss=0.5022 tr_acc=0.7533 val_acc=0.5071 val_f1m=0.4411
+  Ep18 loss=0.4945 tr_acc=0.7595 val_acc=0.5188 val_f1m=0.4872
+  Ep19 loss=0.4852 tr_acc=0.7646 val_acc=0.5385 val_f1m=0.4709
+  Ep20 loss=0.4776 tr_acc=0.7735 val_acc=0.5464 val_f1m=0.5167
+  → test acc=0.4944 f1_macro=0.4852 (1.1 min)
+
+============================================================
+ [V3a] 融合特徵 F=16 (9指標+7K棒), 隔日標籤
+============================================================
+  train=33630 val=7170 test=7080 (test 漲比例=45.90%)
+  Ep01 loss=0.7156 tr_acc=0.5110 val_acc=0.5238 val_f1m=0.4080
+  Ep02 loss=0.6925 tr_acc=0.5209 val_acc=0.5250 val_f1m=0.3442
+  Ep03 loss=0.6916 tr_acc=0.5265 val_acc=0.5219 val_f1m=0.4072
+  Ep04 loss=0.6906 tr_acc=0.5279 val_acc=0.5100 val_f1m=0.5060
+  Ep05 loss=0.6898 tr_acc=0.5357 val_acc=0.5112 val_f1m=0.4852
+  Ep06 loss=0.6897 tr_acc=0.5398 val_acc=0.5204 val_f1m=0.3851
+  Ep07 loss=0.6874 tr_acc=0.5493 val_acc=0.5271 val_f1m=0.3543
+  Ep08 loss=0.6811 tr_acc=0.5579 val_acc=0.5029 val_f1m=0.4961
+  Ep09 loss=0.6756 tr_acc=0.5845 val_acc=0.5017 val_f1m=0.4983
+  Ep10 loss=0.6641 tr_acc=0.5970 val_acc=0.5180 val_f1m=0.4431
+  Ep11 loss=0.6504 tr_acc=0.6176 val_acc=0.5255 val_f1m=0.3766
+  Ep12 loss=0.6316 tr_acc=0.6425 val_acc=0.5010 val_f1m=0.4951
+  Ep13 loss=0.6123 tr_acc=0.6687 val_acc=0.5035 val_f1m=0.4735
+  Ep14 loss=0.5958 tr_acc=0.6869 val_acc=0.5008 val_f1m=0.4945
+  Ep15 loss=0.5854 tr_acc=0.6903 val_acc=0.4957 val_f1m=0.4953
+  Ep16 loss=0.5753 tr_acc=0.6988 val_acc=0.4821 val_f1m=0.4764
+  Ep17 loss=0.5738 tr_acc=0.7012 val_acc=0.4946 val_f1m=0.4677
+  Ep18 loss=0.5627 tr_acc=0.7102 val_acc=0.4944 val_f1m=0.4900
+  Ep19 loss=0.5587 tr_acc=0.7086 val_acc=0.5141 val_f1m=0.4796
+  Ep20 loss=0.5490 tr_acc=0.7208 val_acc=0.5074 val_f1m=0.5019
+  → test acc=0.4756 f1_macro=0.4489 (1.4 min)
+
+============================================================
+ [V3b] 融合特徵 F=16, 5 日標籤
+============================================================
+  train=33630 val=7170 test=7080 (test 漲比例=51.75%)
+  Ep01 loss=0.7126 tr_acc=0.5159 val_acc=0.5252 val_f1m=0.3835
+  Ep02 loss=0.6888 tr_acc=0.5385 val_acc=0.4667 val_f1m=0.4619
+  Ep03 loss=0.6808 tr_acc=0.5652 val_acc=0.4802 val_f1m=0.4754
+  Ep04 loss=0.6570 tr_acc=0.6142 val_acc=0.5105 val_f1m=0.4002
+  Ep05 loss=0.6217 tr_acc=0.6551 val_acc=0.4964 val_f1m=0.4492
+  Ep06 loss=0.5871 tr_acc=0.6887 val_acc=0.4706 val_f1m=0.4647
+  Ep07 loss=0.5637 tr_acc=0.7119 val_acc=0.5106 val_f1m=0.4920
+  Ep08 loss=0.5471 tr_acc=0.7200 val_acc=0.5114 val_f1m=0.4887
+  Ep09 loss=0.5295 tr_acc=0.7354 val_acc=0.4778 val_f1m=0.4543
+  Ep10 loss=0.5176 tr_acc=0.7410 val_acc=0.5144 val_f1m=0.4730
+  Ep11 loss=0.5099 tr_acc=0.7507 val_acc=0.5007 val_f1m=0.5000
+  Ep12 loss=0.4932 tr_acc=0.7599 val_acc=0.5105 val_f1m=0.4713
+  Ep13 loss=0.4851 tr_acc=0.7654 val_acc=0.4937 val_f1m=0.4937
+  Ep14 loss=0.4714 tr_acc=0.7757 val_acc=0.4932 val_f1m=0.4918
+  Ep15 loss=0.4635 tr_acc=0.7799 val_acc=0.4968 val_f1m=0.4756
+  Ep16 loss=0.4481 tr_acc=0.7881 val_acc=0.5029 val_f1m=0.4500
+  Ep17 loss=0.4424 tr_acc=0.7920 val_acc=0.5004 val_f1m=0.4949
+  Ep18 loss=0.4342 tr_acc=0.7959 val_acc=0.4939 val_f1m=0.4920
+  Ep19 loss=0.4243 tr_acc=0.8025 val_acc=0.4881 val_f1m=0.4878
+  Ep20 loss=0.4128 tr_acc=0.8091 val_acc=0.5042 val_f1m=0.4689
+  → test acc=0.4763 f1_macro=0.4744 (1.4 min)
+
+============================================================
+ [V4] 系統 A (AE+OCSVM) 閘門融合
+============================================================
+  [A/bull] 種子 2033
+  [A/bull] 有效樣本 28
+  [A/bear] 種子 1616
+  [A/bear] 有效樣本 20
+  V4_gate_V2: coverage=45.95% n=3253 acc=0.508761143559791
+  V4_gate_V3b: coverage=36.20% n=2563 acc=0.48966055403823644
+
+============================================================
+ [V5a] 信心門檻選擇性預測
+============================================================
+  V5a_conf_V2 tau=0.55: cov=75.61% acc=0.49635718288810016
+  V5a_conf_V2 tau=0.6: cov=51.75% acc=0.49072052401746724
+  V5a_conf_V2 tau=0.65: cov=28.71% acc=0.49090014756517464
+  V5a_conf_V2 tau=0.7: cov=12.30% acc=0.46039035591274396
+  V5a_conf_V2 tau=0.75: cov=6.75% acc=0.46443514644351463
+  V5a_conf_V3b tau=0.55: cov=86.51% acc=0.4724897959183674
+  V5a_conf_V3b tau=0.6: cov=73.36% acc=0.46611474778590684
+  V5a_conf_V3b tau=0.65: cov=60.68% acc=0.4622905027932961
+  V5a_conf_V3b tau=0.7: cov=48.49% acc=0.4535391785610253
+  V5a_conf_V3b tau=0.75: cov=36.78% acc=0.45122887864823347
+
+============================================================
+ [V5b] HistGradientBoosting (平面 16 維特徵, 5 日標籤)
+============================================================
+  val: acc=0.5003 f1_macro=0.4864
+  test: acc=0.4613 f1_macro=0.4206
+  V5b conf tau=0.55: cov=86.79% acc=0.45581773799837266
+  V5b conf tau=0.6: cov=76.41% acc=0.45693160813308686
+  V5b conf tau=0.65: cov=69.55% acc=0.4567424857839155
+  V5b conf tau=0.7: cov=63.43% acc=0.4580271654419951
+  V5b conf tau=0.75: cov=56.82% acc=0.4615958240119314
+
+ALL DONE
