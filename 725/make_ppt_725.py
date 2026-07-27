@@ -69,7 +69,6 @@ add_title(s, "不同檔數:50 → 500(每次 +50, 共 10 輪)")
 img = os.path.join(HERE, "scale_tw500_curve.png")
 if os.path.exists(img):
     s.shapes.add_picture(img, Inches(1.35), Inches(1.3), width=Inches(10.6))
-add_note(s, "TW500 巢狀池(前 50 = 原 TW50);訓練樣本 9 萬 → 88.5 萬", top=6.85, size=14)
 
 # 3. 不同檔數 — 結果表
 s = prs.slides.add_slide(BLANK)
